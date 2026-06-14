@@ -78,6 +78,14 @@ if (Test-Path -LiteralPath $tinyCcSource) {
     Copy-Item -LiteralPath (Get-ChildItem -LiteralPath $tinyCcSource -Force).FullName -Destination $tinyCcTarget -Recurse -Force
 }
 
+$realUpdateConfig = Join-Path $projectDir 'update_config.json'
+$exampleUpdateConfig = Join-Path $projectDir 'update_config.example.json'
+if (Test-Path -LiteralPath $realUpdateConfig) {
+    Copy-Item -LiteralPath $realUpdateConfig -Destination (Join-Path $publishDir 'update_config.json') -Force
+} elseif (Test-Path -LiteralPath $exampleUpdateConfig) {
+    Copy-Item -LiteralPath $exampleUpdateConfig -Destination (Join-Path $publishDir 'update_config.json') -Force
+}
+
 $codePagesCandidates = @(
     (Join-Path $env:USERPROFILE '.nuget\packages\system.text.encoding.codepages\9.0.6\runtimes\win\lib\net9.0\System.Text.Encoding.CodePages.dll'),
     (Join-Path $env:USERPROFILE '.nuget\packages\system.text.encoding.codepages\9.0.6\lib\net9.0\System.Text.Encoding.CodePages.dll'),
@@ -114,6 +122,8 @@ if (Test-Path -LiteralPath $releaseDir) {
 
 $zipPath = Join-Path $releaseDir ($appName + '_' + $version + '_' + $stamp + '.zip')
 Compress-Archive -LiteralPath (Get-ChildItem -LiteralPath $publishDir -Force).FullName -DestinationPath $zipPath -Force
+$latestZipPath = Join-Path $releaseDir ($appName + '_latest.zip')
+Copy-Item -LiteralPath $zipPath -Destination $latestZipPath -Force
 $zipHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $manifest = [ordered]@{
     version = $version
@@ -133,5 +143,7 @@ Write-Host "Legacy deploy synced:"
 Write-Host $legacyDeployDir
 Write-Host "Release zip:"
 Write-Host $zipPath
+Write-Host "Latest alias zip:"
+Write-Host $latestZipPath
 Write-Host "Update manifest:"
 Write-Host $manifestPath

@@ -3,6 +3,6 @@
   "channel": "stable",
   "packageUrl": "can-monitor_V1.79_20260614_000000.zip",
   "sha256": "",
-  "releaseNotes": "Write release notes here.",
+  "releaseNotes": "静态 manifest 模式示例；如果使用下载接口模式，请配置 update_config.json 里的 downloadApiUrl 和 packageFileName。",
   "force": false
 }

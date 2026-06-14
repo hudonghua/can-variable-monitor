@@ -20,6 +20,15 @@ internal sealed class AppUpdateService
         public bool AutoInstall { get; set; }
         public string Channel { get; set; } = "stable";
         public string ManifestUrl { get; set; } = "";
+        public string DownloadApiUrl { get; set; } = "";
+        public string DownloadApiMethod { get; set; } = "POST";
+        public string FileNameParameter { get; set; } = "fileName";
+        public string VersionHeaderName { get; set; } = "X-Version";
+        public string VersionFileName { get; set; } = "";
+        public string PackageFileName { get; set; } = "";
+        public string PackageSha256 { get; set; } = "";
+        public string ReleaseNotes { get; set; } = "";
+        public bool Force { get; set; }
         public int TimeoutSeconds { get; set; } = 8;
     }
 
@@ -60,7 +69,7 @@ internal sealed class AppUpdateService
     public async Task<UpdateCheckResult> CheckAsync(string currentVersion, CancellationToken cancellationToken)
     {
         UpdateConfig? config = ReadConfig();
-        if (config == null || string.IsNullOrWhiteSpace(config.ManifestUrl))
+        if (config == null || (string.IsNullOrWhiteSpace(config.ManifestUrl) && string.IsNullOrWhiteSpace(config.DownloadApiUrl)))
         {
             return new UpdateCheckResult(false, false, "未配置 update_config.json，跳过服务器版本检查。");
         }
@@ -70,6 +79,19 @@ internal sealed class AppUpdateService
             return new UpdateCheckResult(true, false, "自动检查更新已关闭。", config);
         }
 
+        if (!string.IsNullOrWhiteSpace(config.DownloadApiUrl))
+        {
+            return await CheckDownloadApiAsync(config, currentVersion, cancellationToken).ConfigureAwait(false);
+        }
+
+        return await CheckManifestAsync(config, currentVersion, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<UpdateCheckResult> CheckManifestAsync(
+        UpdateConfig config,
+        string currentVersion,
+        CancellationToken cancellationToken)
+    {
         using var httpClient = CreateHttpClient(config);
         using HttpResponseMessage response = await httpClient.GetAsync(config.ManifestUrl, cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
@@ -93,12 +115,56 @@ internal sealed class AppUpdateService
 
         if (CompareVersions(manifest.Version, currentVersion) <= 0)
         {
-            return new UpdateCheckResult(true, false, $"当前已是最新版本：{currentVersion}。", config, manifest);
+            return new UpdateCheckResult(true, false, $"当前已经是最新版本：{currentVersion}。", config, manifest);
         }
 
         if (string.IsNullOrWhiteSpace(manifest.PackageUrl))
         {
             return new UpdateCheckResult(true, false, $"发现新版本 {manifest.Version}，但服务器版本文件缺少 packageUrl。", config, manifest);
+        }
+
+        return new UpdateCheckResult(true, true, $"发现新版本：{manifest.Version}。", config, manifest);
+    }
+
+    private async Task<UpdateCheckResult> CheckDownloadApiAsync(
+        UpdateConfig config,
+        string currentVersion,
+        CancellationToken cancellationToken)
+    {
+        string probeFileName = FirstNonEmpty(config.VersionFileName, config.PackageFileName);
+        if (string.IsNullOrWhiteSpace(probeFileName))
+        {
+            return new UpdateCheckResult(true, false, "自动更新 API 模式缺少 packageFileName 或 versionFileName。", config);
+        }
+
+        using var httpClient = CreateHttpClient(config);
+        using HttpRequestMessage request = CreateDownloadApiRequest(config, probeFileName);
+        using HttpResponseMessage response = await httpClient.SendAsync(
+            request,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+
+        string version = GetHeaderValue(response, FirstNonEmpty(config.VersionHeaderName, "X-Version"));
+        if (string.IsNullOrWhiteSpace(version))
+        {
+            return new UpdateCheckResult(true, false, "自动更新 API 返回头缺少 X-Version，无法判断版本。", config);
+        }
+
+        string packageFileName = FirstNonEmpty(config.PackageFileName, probeFileName);
+        var manifest = new UpdateManifest
+        {
+            Version = version.Trim(),
+            Channel = config.Channel,
+            PackageUrl = packageFileName,
+            Sha256 = config.PackageSha256,
+            ReleaseNotes = config.ReleaseNotes,
+            Force = config.Force
+        };
+
+        if (CompareVersions(manifest.Version, currentVersion) <= 0)
+        {
+            return new UpdateCheckResult(true, false, $"当前已经是最新版本：{currentVersion}。", config, manifest);
         }
 
         return new UpdateCheckResult(true, true, $"发现新版本：{manifest.Version}。", config, manifest);
@@ -110,14 +176,18 @@ internal sealed class AppUpdateService
         IProgress<string>? progress,
         CancellationToken cancellationToken)
     {
-        Uri packageUri = ResolvePackageUri(config.ManifestUrl, manifest.PackageUrl);
+        bool downloadApiMode = !string.IsNullOrWhiteSpace(config.DownloadApiUrl);
+        Uri? packageUri = downloadApiMode ? null : ResolvePackageUri(config.ManifestUrl, manifest.PackageUrl);
         Directory.CreateDirectory(_downloadDirectory);
         string safeVersion = Regex.Replace(manifest.Version.Trim(), @"[^\w\.-]+", "_");
         string packagePath = Path.Combine(_downloadDirectory, $"update_{safeVersion}.zip");
         string tempPath = packagePath + ".download";
 
         using var httpClient = CreateHttpClient(config);
-        using HttpResponseMessage response = await httpClient.GetAsync(packageUri, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+        using HttpRequestMessage? apiRequest = downloadApiMode ? CreateDownloadApiRequest(config, manifest.PackageUrl) : null;
+        using HttpResponseMessage response = downloadApiMode
+            ? await httpClient.SendAsync(apiRequest!, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false)
+            : await httpClient.GetAsync(packageUri!, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
         long? totalBytes = response.Content.Headers.ContentLength;
         await using Stream source = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
@@ -217,6 +287,65 @@ internal sealed class AppUpdateService
 
         var manifestUri = new Uri(manifestUrl, UriKind.Absolute);
         return new Uri(manifestUri, packageUrl);
+    }
+
+    private static HttpRequestMessage CreateDownloadApiRequest(UpdateConfig config, string fileName)
+    {
+        string method = FirstNonEmpty(config.DownloadApiMethod, "POST").ToUpperInvariant();
+        return new HttpRequestMessage(new HttpMethod(method), BuildDownloadApiUri(config, fileName));
+    }
+
+    private static Uri BuildDownloadApiUri(UpdateConfig config, string fileName)
+    {
+        if (string.IsNullOrWhiteSpace(config.DownloadApiUrl))
+        {
+            throw new InvalidOperationException("downloadApiUrl is empty.");
+        }
+
+        if (string.IsNullOrWhiteSpace(fileName))
+        {
+            throw new InvalidOperationException("fileName is empty.");
+        }
+
+        var builder = new UriBuilder(config.DownloadApiUrl);
+        string parameterName = FirstNonEmpty(config.FileNameParameter, "fileName");
+        string query = builder.Query;
+        if (query.StartsWith("?", StringComparison.Ordinal))
+        {
+            query = query[1..];
+        }
+
+        string encodedPair = Uri.EscapeDataString(parameterName) + "=" + Uri.EscapeDataString(fileName);
+        builder.Query = string.IsNullOrWhiteSpace(query) ? encodedPair : query + "&" + encodedPair;
+        return builder.Uri;
+    }
+
+    private static string GetHeaderValue(HttpResponseMessage response, string headerName)
+    {
+        if (response.Headers.TryGetValues(headerName, out IEnumerable<string>? values))
+        {
+            return values.FirstOrDefault() ?? "";
+        }
+
+        if (response.Content.Headers.TryGetValues(headerName, out values))
+        {
+            return values.FirstOrDefault() ?? "";
+        }
+
+        return "";
+    }
+
+    private static string FirstNonEmpty(params string?[] values)
+    {
+        foreach (string? value in values)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                return value.Trim();
+            }
+        }
+
+        return "";
     }
 
     private static async Task<string> ComputeSha256Async(string path, CancellationToken cancellationToken)

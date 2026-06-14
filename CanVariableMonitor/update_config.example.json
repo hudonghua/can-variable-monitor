@@ -2,6 +2,14 @@
   "autoCheck": true,
   "autoInstall": false,
   "channel": "stable",
-  "manifestUrl": "https://example.com/can-monitor/update_manifest.json",
+  "downloadApiUrl": "http://8.148.250.52/anyixt-cloud-device/utility-base-api/v1/device_config/download_file",
+  "downloadApiMethod": "POST",
+  "fileNameParameter": "fileName",
+  "versionHeaderName": "X-Version",
+  "versionFileName": "",
+  "packageFileName": "上位机监控_latest.zip",
+  "packageSha256": "",
+  "releaseNotes": "",
+  "force": false,
   "timeoutSeconds": 8
 }
