@@ -1,0 +1,143 @@
+{
+  "source": "jlink",
+  "interval_ms": 300,
+  "endian": "little",
+  "jlink": {
+    "exe": "JLink.exe",
+    "device": "LPC1764",
+    "interface": "SWD",
+    "speed_khz": 4000
+  },
+  "map_file": "F:\\工作\\AI模型\\y云南玉溪\\HP6接收机模板(老方式无线模块)\\FLASH\\HP6_A.map",
+  "variables": [
+    {
+      "name": "timer0_counter",
+      "type": "uint32",
+      "format": "dec"
+    },
+    {
+      "name": "gT010msFlg",
+      "type": "uint8",
+      "format": "dec"
+    },
+    {
+      "name": "gCanCyc",
+      "type": "uint16",
+      "format": "dec"
+    },
+    {
+      "name": "CAN1RxCount",
+      "type": "uint32",
+      "format": "dec"
+    },
+    {
+      "name": "CAN1ErrCount",
+      "type": "uint32",
+      "format": "dec"
+    },
+    {
+      "name": "gID",
+      "type": "uint8",
+      "format": "hex"
+    },
+    {
+      "name": "gSysStatus",
+      "type": "uint32",
+      "format": "hex"
+    },
+    {
+      "name": "ADC0IntDone",
+      "type": "uint32",
+      "format": "dec"
+    },
+    {
+      "name": "gADConvFlg",
+      "type": "uint8",
+      "format": "dec"
+    },
+    {
+      "name": "wdt_counter",
+      "type": "uint32",
+      "format": "dec"
+    },
+    {
+      "name": "gSysInfo[0].vCANID",
+      "symbol": "gSysInfo",
+      "address_offset": 2,
+      "type": "uint8",
+      "format": "hex"
+    },
+    {
+      "name": "gSysInfo[0].vBps",
+      "symbol": "gSysInfo",
+      "address_offset": 4,
+      "type": "uint8",
+      "format": "dec"
+    },
+    {
+      "name": "gSysInfo[0].vCycle",
+      "symbol": "gSysInfo",
+      "address_offset": 10,
+      "type": "uint8",
+      "format": "dec",
+      "unit": "x10ms"
+    },
+    {
+      "name": "gRunInfo.vArm[0]",
+      "symbol": "gRunInfo",
+      "address_offset": 0,
+      "type": "uint8",
+      "format": "dec"
+    },
+    {
+      "name": "gRunInfo.vArm[1]",
+      "symbol": "gRunInfo",
+      "address_offset": 1,
+      "type": "uint8",
+      "format": "dec"
+    },
+    {
+      "name": "gRunInfo.vArm[2]",
+      "symbol": "gRunInfo",
+      "address_offset": 2,
+      "type": "uint8",
+      "format": "dec"
+    },
+    {
+      "name": "gRunInfo.vArm[3]",
+      "symbol": "gRunInfo",
+      "address_offset": 3,
+      "type": "uint8",
+      "format": "dec"
+    },
+    {
+      "name": "gRunInfo.vYKJiTing",
+      "symbol": "gRunInfo",
+      "address_offset": 19,
+      "type": "uint8",
+      "format": "hex"
+    },
+    {
+      "name": "gRunInfo.vLaBaFlg",
+      "symbol": "gRunInfo",
+      "address_offset": 21,
+      "type": "uint8",
+      "format": "dec"
+    },
+    {
+      "name": "gRunInfo.vDOCAN",
+      "symbol": "gRunInfo",
+      "address_offset": 92,
+      "type": "uint32",
+      "format": "hex"
+    },
+    {
+      "name": "gSysInfo.raw",
+      "symbol": "gSysInfo",
+      "address_offset": 0,
+      "type": "bytes",
+      "size": 30
+    }
+  ]
+}
+

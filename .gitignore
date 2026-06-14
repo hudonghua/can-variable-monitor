@@ -1,0 +1,40 @@
+# Build output
+**/bin/
+**/obj/
+**/dist/
+**/dist*/
+**/release/
+
+# Binary dependencies and packaged tools should be delivered through releases,
+# not mixed into the source repository.
+*.dll
+*.exe
+*.a
+CanVariableMonitor/tools/tinycc/
+
+# Local IDE/user files
+*.user
+*.suo
+.vs/
+
+# Backups and temporary recovery files
+*.bak
+*.bak_*
+*.corrupt_*
+*.canmon_bak_*
+
+# Screenshots and verification captures
+verify_*.png
+*.tmp
+*.log
+
+# Large local installers / extracted drivers
+*.zip
+PEAK_DeviceDriverSetup_latest/
+
+# Decompiled or generated reverse-engineering output
+decompiled_canmon/
+
+# Local customer/private configs
+update_config.json
+watch_config.json

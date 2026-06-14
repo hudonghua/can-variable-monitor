@@ -1,0 +1,35 @@
+{
+  "source": "mock",
+  "interval_ms": 300,
+  "endian": "little",
+  "jlink": {
+    "exe": "JLink.exe",
+    "device": "STM32F103C8",
+    "interface": "SWD",
+    "speed_khz": 4000
+  },
+  "map_file": "",
+  "variables": [
+    {
+      "name": "g_counter",
+      "address": "0x20000000",
+      "type": "uint32",
+      "format": "dec"
+    },
+    {
+      "name": "g_temperature",
+      "address": "0x20000004",
+      "type": "int16",
+      "scale": 0.1,
+      "unit": "C",
+      "format": "dec"
+    },
+    {
+      "name": "g_flags",
+      "address": "0x20000008",
+      "type": "uint8",
+      "format": "hex"
+    }
+  ]
+}
+

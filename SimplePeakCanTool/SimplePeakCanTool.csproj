@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>PEAK简易CAN工具</AssemblyName>
+    <RootNamespace>SimplePeakCanTool</RootNamespace>
+    <RuntimeIdentifier>win-x86</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <ApplicationIcon>PeakCAN.ico</ApplicationIcon>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="ECanVci.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="ECanVci64.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="UcanDotNET.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="usbcan32.dll" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

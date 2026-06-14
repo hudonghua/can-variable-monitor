@@ -1,0 +1,7 @@
+{
+  "autoCheck": true,
+  "autoInstall": false,
+  "channel": "stable",
+  "manifestUrl": "https://example.com/can-monitor/update_manifest.json",
+  "timeoutSeconds": 8
+}

@@ -1,0 +1,36 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RuntimeIdentifiers>win-x86;win-x64</RuntimeIdentifiers>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <AssemblyName>上位机监控</AssemblyName>
+    <RootNamespace>CanVariableMonitor</RootNamespace>
+    <Title>上位机监控</Title>
+    <Product>上位机监控</Product>
+    <Company>长沙康旭电子科技有限公司</Company>
+    <ApplicationIcon />
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CLanguage" Version="0.22.225" />
+    <PackageReference Include="Scintilla5.NET" Version="6.1.2" />
+    <PackageReference Include="System.Text.Encoding.CodePages" Version="9.0.6" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="F:\工作\AI模型\AI_boot\统一\unified_package\ECanVci.dll" Link="ECanVci.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="F:\工作\AI模型\AI_boot\统一\unified_package\ECanVci64.dll" Link="ECanVci64.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="F:\工作\AI模型\AI_boot\统一\unified_package\UcanDotNET.dll" Link="UcanDotNET.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="F:\工作\AI模型\AI_boot\统一\unified_package\usbcan32.dll" Link="usbcan32.dll" CopyToOutputDirectory="PreserveNewest" />
+    <EmbeddedResource Include="..\can_monitor_agent.c" LogicalName="CanVariableMonitor.can_monitor_agent.c" />
+    <None Include="workdir.example.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="update_config.example.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="update_manifest.example.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

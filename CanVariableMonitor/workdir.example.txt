@@ -1,0 +1,3 @@
+Put the customer Keil source workspace directory here, one line only.
+Example:
+D:\CustomerProject\HP6
