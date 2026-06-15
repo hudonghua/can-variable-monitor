@@ -62,6 +62,7 @@ internal sealed class MonitorProfile
     public float FunctionCodeFontSize { get; set; } = 10.5f;
     public float ProgramTreeFontSize { get; set; } = 15f;
     public List<int> MonitorColumnWidths { get; set; } = new();
+    public List<string> OfflineRootFunctions { get; set; } = new();
     public List<WatchItem> Variables { get; set; } = new();
 }
 

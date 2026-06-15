@@ -948,7 +948,7 @@ internal static partial class ProgramGraphGenerator
     {
         string[] preferred =
         {
-            "MyLogic_10ms", "MyLogic", "Work", "Control", "Ctrl", "Logic", "Process", "Usr", "App", "main"
+            "10ms", "1ms", "Tick", "Loop", "Task", "Work", "Control", "Ctrl", "Logic", "Process", "Usr", "App", "main"
         };
 
         foreach (string name in preferred)
@@ -971,12 +971,6 @@ internal static partial class ProgramGraphGenerator
 
     private static FunctionNode? FindPrimaryBusinessEntry(List<FunctionNode> functions, FunctionNode preferredStart)
     {
-        FunctionNode? exact10ms = FindFunction(functions, "MyLogic_10ms");
-        if (exact10ms != null && HasMeaningfulBusinessBody(exact10ms))
-        {
-            return exact10ms;
-        }
-
         FunctionNode? bestPeriodic = FindPeriodicEntryCandidates(functions).FirstOrDefault();
         if (bestPeriodic != null)
         {
@@ -1015,16 +1009,6 @@ internal static partial class ProgramGraphGenerator
         if (IsSchedulerTickFunction(function))
         {
             return false;
-        }
-
-        if (name.Equals("MyLogic_10ms", StringComparison.OrdinalIgnoreCase))
-        {
-            return HasMeaningfulBusinessBody(function);
-        }
-
-        if (name.Equals("MyLogic_1ms", StringComparison.OrdinalIgnoreCase))
-        {
-            return HasMeaningfulBusinessBody(function);
         }
 
         bool hasPeriodToken =
@@ -1097,15 +1081,11 @@ internal static partial class ProgramGraphGenerator
         string combined = function.FilePath.Replace('\\', '/') + "/" + name;
         EmbeddedCodeAnalysis analysis = AnalyzeFunction(function);
         int score = 0;
-        if (name.Equals("MyLogic_10ms", StringComparison.OrdinalIgnoreCase))
-        {
-            score += 1000;
-        }
         if (combined.Contains("10ms", StringComparison.OrdinalIgnoreCase) || analysis.Domain == "period10")
         {
             score += 500;
         }
-        if (name.Equals("MyLogic_1ms", StringComparison.OrdinalIgnoreCase) || analysis.Domain == "period1")
+        if (combined.Contains("1ms", StringComparison.OrdinalIgnoreCase) || analysis.Domain == "period1")
         {
             score += 260;
         }
@@ -1288,7 +1268,6 @@ internal static partial class ProgramGraphGenerator
         if (selected.Count == 0)
         {
             AddSeed(preferredStart, 0);
-            AddSeed(FindFunction(functions, "MyLogic_10ms"), 0);
         }
 
         foreach (FunctionNode candidate in functions
@@ -1350,7 +1329,7 @@ internal static partial class ProgramGraphGenerator
         }
 
         HashSet<string> period10Ids = logic10msEntry == null
-            ? BuildReachableFunctionIds(functions, edges, "MyLogic_10ms", maxDepth)
+            ? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             : BuildReachableFunctionIds(functions, edges, logic10msEntry.Id, maxDepth, rootIsId: true);
 
         var graphNodes = selected
@@ -1454,12 +1433,6 @@ internal static partial class ProgramGraphGenerator
 
     private static FunctionNode? FindDisplayBusinessEntry(List<FunctionNode> functions, HashSet<CallEdge> edges)
     {
-        FunctionNode? dispMain = FindFunction(functions, "Disp_main");
-        if (dispMain != null && HasMeaningfulBusinessBody(dispMain))
-        {
-            return dispMain;
-        }
-
         List<FunctionNode> lcdWriters = functions
             .Where(f => CallsLcdBusinessWrite(f) && !IsHiddenGraphUtility(f))
             .OrderByDescending(f => CountLcdBusinessWrites(f))
@@ -1754,7 +1727,7 @@ internal static partial class ProgramGraphGenerator
     private static bool IsMandatoryBusinessEntry(FunctionNode function)
     {
         return IsPeriodicEntryCandidate(function) ||
-            function.Name.Equals("Disp_main", StringComparison.OrdinalIgnoreCase);
+            Regex.IsMatch(function.Name, @"(?:^|_)(?:disp|display|lcd|screen|page)(?:_|$)", RegexOptions.IgnoreCase);
     }
 
     private static bool IsHiddenGraphUtility(FunctionNode function)
@@ -2082,7 +2055,8 @@ internal static partial class ProgramGraphGenerator
         string combined = path + "/" + name;
         return combined.Contains("10ms", StringComparison.OrdinalIgnoreCase) ||
             combined.Contains("T010ms", StringComparison.OrdinalIgnoreCase) ||
-            combined.Contains("MyLogic_10ms", StringComparison.OrdinalIgnoreCase);
+            combined.Contains("tick", StringComparison.OrdinalIgnoreCase) ||
+            combined.Contains("cycle", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsBusinessFunction(FunctionNode function)
@@ -2462,7 +2436,11 @@ internal static partial class ProgramGraphGenerator
         AddStepIfPresent(result, functions, mainBody, "参数保存", "秒级 / Save_Info_Prog", 0x2130, "Save_Info_Prog");
         AddStepIfPresent(result, functions, mainBody, "无线恢复", "秒级 / wl_reset", 0x2131, "wl_reset");
 
-        AddStepIfPresent(result, functions, mainBody, "10ms业务入口", "10ms / MyLogic_10ms", 0x2100, "MyLogic_10ms");
+        FunctionNode? periodicEntry = FindPeriodicEntryCandidates(functions).FirstOrDefault();
+        if (periodicEntry != null)
+        {
+            result.Add(new ProgramFrameworkStep("周期业务入口", FunctionSummary(periodicEntry), TraceIdForFunction(periodicEntry), periodicEntry.Name, FunctionSummary(periodicEntry)));
+        }
 
         if (result.Count == 0)
         {
@@ -2497,8 +2475,7 @@ internal static partial class ProgramGraphGenerator
 				FunctionSummary(function)));
 		}
 
-		FunctionNode? displayEntry = FindFunction(functions, "Disp_main") ??
-			functions
+		FunctionNode? displayEntry = functions
 				.Where(f => CallsLcdBusinessWrite(f) && !IsHiddenGraphUtility(f))
 				.OrderByDescending(CountLcdBusinessWrites)
 				.ThenBy(f => f.FilePath, StringComparer.OrdinalIgnoreCase)
@@ -2507,7 +2484,7 @@ internal static partial class ProgramGraphGenerator
 		if (displayEntry != null && result.All(step => !step.FunctionName.Equals(displayEntry.Name, StringComparison.OrdinalIgnoreCase)))
 		{
 			result.Add(new ProgramFrameworkStep(
-				displayEntry.Name.Equals("Disp_main", StringComparison.OrdinalIgnoreCase) ? "200屏显示入口" : "显示输出入口",
+				"显示输出入口",
 				FunctionSummary(displayEntry),
 				TraceIdForFunction(displayEntry),
 				displayEntry.Name,
@@ -2533,8 +2510,7 @@ internal static partial class ProgramGraphGenerator
 			order++;
 		}
 
-		FunctionNode? displayEntry = FindFunction(functions, "Disp_main") ??
-			functions
+		FunctionNode? displayEntry = functions
 				.Where(f => CallsLcdBusinessWrite(f) && !IsHiddenGraphUtility(f))
 				.OrderByDescending(CountLcdBusinessWrites)
 				.ThenBy(f => f.FilePath, StringComparer.OrdinalIgnoreCase)
@@ -2713,7 +2689,7 @@ internal static partial class ProgramGraphGenerator
 
     private static ushort TraceIdForFunction(FunctionNode function)
     {
-        if (function.Name.Equals("MyLogic_10ms", StringComparison.OrdinalIgnoreCase))
+        if (IsPeriodicEntryCandidate(function))
         {
             return 0x2100;
         }

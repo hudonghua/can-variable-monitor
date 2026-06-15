@@ -64,59 +64,60 @@ function Assert-Equal {
 try {
     $project = [ordered]@{
         workDirectory = "C:\Temp\canmon_offline_selftest"
-        signature = "offline-worker-selftest-force-chain"
-        rootFunctions = @("MyLogic_10ms")
+        signature = "offline-worker-selftest-app-chain"
+        rootFunctions = @("App_Tick10ms")
         sources = @(
             [ordered]@{
-                functionName = "MyLogic_10ms"
-                filePath = "selftest.c"
+                functionName = "App_Tick10ms"
+                filePath = "App\selftest.c"
                 startLine = 1
                 lines = @(
-                    "void MyLogic_10ms(void)",
+                    "void App_Tick10ms(void)",
                     "{",
-                    "  ZY_logic();",
+                    "  App_BusinessStep();",
+                    "  CAN_SendFrame(0, 0);",
                     "}"
                 )
             },
             [ordered]@{
-                functionName = "ZY_logic"
-                filePath = "selftest.c"
+                functionName = "App_BusinessStep"
+                filePath = "App\selftest.c"
                 startLine = 10
                 lines = @(
-                    "void ZY_logic(void)",
+                    "void App_BusinessStep(void)",
                     "{",
-                    "  KM_NO(1, 1);",
+                    "  App_OutputLatch(1, 1);",
                     "}"
                 )
             },
             [ordered]@{
-                functionName = "KM_NO"
-                filePath = "selftest.c"
+                functionName = "App_OutputLatch"
+                filePath = "App\selftest.c"
                 startLine = 20
                 lines = @(
-                    "void KM_NO(unsigned int vMS, unsigned int vNo)",
+                    "void App_OutputLatch(unsigned int vMS, unsigned int vNo)",
                     "{",
-                    "  if (B134 == 1 && hand_auto == 1)",
+                    "  if (InputReady == 1 && ModeAuto == 1)",
                     "  {",
-                    "    NO2_SW_count++;",
-                    "    if (NO2_SW_count > 3)",
+                    "    OutputCount++;",
+                    "    if (OutputCount > 3)",
                     "    {",
-                    "      Auto_work_flags_KM1_1 = 1;",
+                    "      OutputLatch = 1;",
                     "    }",
                     "  }",
                     "  else",
                     "  {",
-                    "    NO2_SW_count = 0;",
+                    "    OutputCount = 0;",
                     "  }",
                     "}"
                 )
             }
         )
         variables = @(
-            [ordered]@{ key = "B134"; name = "B134"; address = 1; size = 1; typeName = "uint8"; rawValue = 0; forceActive = $false; aliases = @("B134") },
-            [ordered]@{ key = "hand_auto"; name = "hand_auto"; address = 2; size = 1; typeName = "uint8"; rawValue = 0; forceActive = $false; aliases = @("hand_auto") },
-            [ordered]@{ key = "NO2_SW_count"; name = "NO2_SW_count"; address = 3; size = 2; typeName = "uint16"; rawValue = 0; forceActive = $false; aliases = @("NO2_SW_count") },
-            [ordered]@{ key = "Auto_work_flags_KM1_1"; name = "Auto_work_flags_KM1_1"; address = 4; size = 1; typeName = "uint8"; rawValue = 0; forceActive = $false; aliases = @("Auto_work_flags_KM1_1") }
+            [ordered]@{ key = "InputReady"; name = "InputReady"; address = 1; size = 1; typeName = "uint8"; rawValue = 0; forceActive = $false; aliases = @("InputReady") },
+            [ordered]@{ key = "ModeAuto"; name = "ModeAuto"; address = 2; size = 1; typeName = "uint8"; rawValue = 0; forceActive = $false; aliases = @("ModeAuto") },
+            [ordered]@{ key = "OutputCount"; name = "OutputCount"; address = 3; size = 2; typeName = "uint16"; rawValue = 0; forceActive = $false; aliases = @("OutputCount") },
+            [ordered]@{ key = "OutputLatch"; name = "OutputLatch"; address = 4; size = 1; typeName = "uint8"; rawValue = 0; forceActive = $false; aliases = @("OutputLatch") }
         )
     }
 
@@ -124,24 +125,25 @@ try {
     Assert-Equal $result.ok $true "InitProject failed"
     Assert-Equal $result.engineAvailable $true "TinyCC engine unavailable"
 
-    $result = Send-WorkerCommand "ForceVariable" ([ordered]@{ key = "B134"; name = "B134"; rawValue = 1; size = 1 })
-    Assert-Equal $result.ok $true "Force B134 failed"
-    $result = Send-WorkerCommand "ForceVariable" ([ordered]@{ key = "hand_auto"; name = "hand_auto"; rawValue = 1; size = 1 })
-    Assert-Equal $result.ok $true "Force hand_auto failed"
+    $result = Send-WorkerCommand "ForceVariable" ([ordered]@{ key = "InputReady"; name = "InputReady"; rawValue = 1; size = 1 })
+    Assert-Equal $result.ok $true "Force InputReady failed"
+    $result = Send-WorkerCommand "ForceVariable" ([ordered]@{ key = "ModeAuto"; name = "ModeAuto"; rawValue = 1; size = 1 })
+    Assert-Equal $result.ok $true "Force ModeAuto failed"
 
     for ($i = 1; $i -le 5; $i++) {
         $result = Send-WorkerCommand "RunTick" $null
         Assert-Equal $result.ok $true "RunTick $i failed"
-        Assert-Equal $result.values.NO2_SW_count $i "NO2_SW_count did not advance on tick $i"
+        Assert-Equal $result.values.OutputCount $i "OutputCount did not advance on tick $i"
         $stubWarnings = @($result.coverage | Where-Object { $_ -like "*stub*" })
-        if ($stubWarnings.Count -gt 0) {
-            throw "Business helper was stubbed during self-test: $($stubWarnings -join '; ')"
+        $businessStubWarnings = @($stubWarnings | Where-Object { $_ -like "*业务调用被 stub*" })
+        if ($businessStubWarnings.Count -gt 0) {
+            throw "Business helper was stubbed during self-test: $($businessStubWarnings -join '; ')"
         }
     }
-    Assert-Equal $result.values.Auto_work_flags_KM1_1 1 "Auto_work_flags_KM1_1 was not set after repeated ticks"
+    Assert-Equal $result.values.OutputLatch 1 "OutputLatch was not set after repeated ticks"
 
     $latestTick = Get-ChildItem -LiteralPath (Join-Path $env:LOCALAPPDATA "CanVariableMonitor\offline_c_worker") -Recurse -Filter "canmon_tick.c" -File |
-        Where-Object { $_.FullName -like "*offline-worker-selftest-force-chain*" } |
+        Where-Object { $_.FullName -like "*offline-worker-selftest-app-chain*" } |
         Sort-Object LastWriteTime -Descending |
         Select-Object -First 1
     if (-not $latestTick) {
@@ -153,14 +155,18 @@ try {
         throw "Generated canmon_tick.c has no main()."
     }
     $mainText = $generated.Substring($mainIndex)
-    if ($mainText -match "(?m)^\s+ZY_logic\(\);") {
-        throw "ZY_logic was scheduled as a root. Helpers must be reached through MyLogic_10ms only."
+    if ($mainText -match "(?m)^\s+App_BusinessStep\(\);") {
+        throw "App_BusinessStep was scheduled as a root. Helpers must be reached through App_Tick10ms only."
     }
-    if ($mainText -match "(?m)^\s+KM_NO\(\);") {
-        throw "KM_NO was scheduled as a root. Helpers must be reached through MyLogic_10ms -> ZY_logic only."
+    if ($mainText -match "(?m)^\s+App_OutputLatch\(\);") {
+        throw "App_OutputLatch was scheduled as a root. Helpers must be reached through App_Tick10ms -> App_BusinessStep only."
     }
 
-    Write-Host "Offline worker self-test passed: MyLogic_10ms -> ZY_logic -> KM_NO advanced 5 ticks under forced inputs."
+    if ($generated -notmatch "__canmon_record_output\(""CAN_SendFrame""\)") {
+        throw "Output boundary CAN_SendFrame was not converted to output recording stub."
+    }
+
+    Write-Host "Offline worker self-test passed: generic app chain advanced 5 ticks; bottom CAN_SendFrame was recorded, not compiled as driver code."
 }
 finally {
     try {

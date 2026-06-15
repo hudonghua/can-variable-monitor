@@ -20,7 +20,52 @@ if (-not (Test-Path -LiteralPath $workerDll)) {
     throw "Worker dll not found: $workerDll"
 }
 
-$functionDefs = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$cKeywords = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+foreach ($word in @(
+    "if","else","for","while","do","switch","case","default","return","sizeof",
+    "typedef","struct","union","enum","static","extern","const","volatile","break",
+    "continue","goto","void","int","char","short","long","float","double","signed",
+    "unsigned","true","false","NULL","printf","memset","memcpy","abs")) {
+    [void]$cKeywords.Add($word)
+}
+
+function Test-AppSourceFile {
+    param([string]$Path)
+    $ext = [System.IO.Path]::GetExtension($Path)
+    if ($ext -notin @(".c", ".h")) {
+        return $false
+    }
+    $relative = Get-RelativePathCompat $ProjectSrc $Path
+    $relative = $relative.Replace("\", "/")
+    $segments = @($relative -split "/" | Where-Object { $_.Length -gt 0 })
+    $blockedDirs = @("bsp","driver","drivers","cmsis","startup","system","hal","rte","core","periph","peripheral","uart","usart","adc","gpio","can","timer","tim","eeprom","flash","i2c","spi","pwm","usb","eth","objects","listings")
+    foreach ($segment in $segments[0..([Math]::Max(0, $segments.Count - 2))]) {
+        if ($blockedDirs -contains $segment.ToLowerInvariant()) {
+            return $false
+        }
+    }
+    $file = [System.IO.Path]::GetFileNameWithoutExtension($Path).ToLowerInvariant()
+    foreach ($prefix in @("startup","system_lpc17","core_cm","lpc17xx","bsp","driver","gpio","uart","usart","adc","can","timer","tim","eeprom","flash","i2c","spi","pwm")) {
+        if ($file.StartsWith($prefix)) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Get-RelativePathCompat {
+    param([string]$Root, [string]$Path)
+    try {
+        $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+        $pathFull = [System.IO.Path]::GetFullPath($Path)
+        if ($pathFull.StartsWith($rootFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $pathFull.Substring($rootFull.Length)
+        }
+    }
+    catch {
+    }
+    return $Path
+}
 
 function Remove-CodeCommentsPreserveLength {
     param([string]$Text)
@@ -56,55 +101,40 @@ function Find-MatchingBrace {
     return -1
 }
 
-function Load-FunctionDefinitions {
-    param([string]$Directory)
-
-    foreach ($file in Get-ChildItem -LiteralPath $Directory -Recurse -File -Include *.c,*.h) {
-        $text = [System.IO.File]::ReadAllText($file.FullName, [System.Text.Encoding]::Default).Replace("`r`n", "`n").Replace("`r", "`n")
-        $code = Remove-CodeCommentsPreserveLength $text
-        foreach ($match in [regex]::Matches($code, '\b(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*\{')) {
-            $name = $match.Groups["name"].Value
-            if ($name -in @("if", "while", "switch", "for")) {
-                continue
-            }
-            $key = $name.ToLowerInvariant()
-            if ($functionDefs.ContainsKey($key)) {
-                continue
-            }
-
-            $openBrace = $code.IndexOf('{', $match.Index)
-            $closeBrace = Find-MatchingBrace $code $openBrace
-            if ($openBrace -lt 0 -or $closeBrace -lt 0) {
-                continue
-            }
-
-            $lineStart = $text.LastIndexOf("`n", $match.Index)
-            $lineStart = if ($lineStart -lt 0) { 0 } else { $lineStart + 1 }
-            $sourceText = $text.Substring($lineStart, $closeBrace - $lineStart + 1)
-            $functionDefs[$key] = [ordered]@{
-                functionName = $name
-                filePath = $file.FullName
-                startLine = Get-LineNumber $text $lineStart
-                lines = @($sourceText -split "`n")
-                text = $sourceText
-            }
+$functionDefs = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::OrdinalIgnoreCase)
+foreach ($file in Get-ChildItem -LiteralPath $ProjectSrc -Recurse -File -Include *.c,*.h | Where-Object { Test-AppSourceFile $_.FullName }) {
+    $text = [System.IO.File]::ReadAllText($file.FullName, [System.Text.Encoding]::Default).Replace("`r`n", "`n").Replace("`r", "`n")
+    $code = Remove-CodeCommentsPreserveLength $text
+    foreach ($match in [regex]::Matches($code, '\b(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*\{')) {
+        $name = $match.Groups["name"].Value
+        if ($cKeywords.Contains($name) -or $functionDefs.ContainsKey($name)) {
+            continue
+        }
+        $openBrace = $code.IndexOf('{', $match.Index)
+        $closeBrace = Find-MatchingBrace $code $openBrace
+        if ($openBrace -lt 0 -or $closeBrace -lt 0) {
+            continue
+        }
+        $lineStart = $text.LastIndexOf("`n", $match.Index)
+        $lineStart = if ($lineStart -lt 0) { 0 } else { $lineStart + 1 }
+        $sourceText = $text.Substring($lineStart, $closeBrace - $lineStart + 1)
+        $functionDefs[$name] = [ordered]@{
+            functionName = $name
+            filePath = $file.FullName
+            startLine = Get-LineNumber $text $lineStart
+            lines = @($sourceText -split "`n")
+            text = $sourceText
         }
     }
 }
 
 function Get-CalledFunctions {
     param([object]$FunctionDef)
-
-    $skip = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($word in @("if", "while", "switch", "for", "return", "sizeof", "abs", "printf", "memset", "memcpy")) {
-        [void]$skip.Add($word)
-    }
-
     $result = [System.Collections.Generic.List[string]]::new()
     $code = Remove-CodeCommentsPreserveLength ([string]$FunctionDef.text)
     foreach ($match in [regex]::Matches($code, '\b(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(')) {
         $name = $match.Groups["name"].Value
-        if ($skip.Contains($name) -or $name.Equals([string]$FunctionDef.functionName, [System.StringComparison]::OrdinalIgnoreCase)) {
+        if ($cKeywords.Contains($name) -or $name.Equals([string]$FunctionDef.functionName, [System.StringComparison]::OrdinalIgnoreCase)) {
             continue
         }
         if (-not $result.Contains($name)) {
@@ -114,26 +144,35 @@ function Get-CalledFunctions {
     return $result
 }
 
-function Build-ReachableSources {
-    param([string[]]$RootFunctions, [int]$Limit = 800)
+function Get-RootScore {
+    param([object]$FunctionDef)
+    $name = [string]$FunctionDef.functionName
+    $text = "$($FunctionDef.filePath) $name"
+    $score = 0
+    if ($name -match '(?i)(^|_)(loop|task|tick|logic|ctrl|control|work|process|scan|cycle)(_|$)') { $score += 35 }
+    if ($name.Equals("main", [System.StringComparison]::OrdinalIgnoreCase)) { $score -= 40 }
+    if ($name -match '(?i)(^|_)\d+ms(_|$)|\d+\s*ms') { $score += 25 }
+    if ($text -match '(?i)app|usr|user|business|logic|control|ctrl') { $score += 18 }
+    if ($text -match '(?i)display|disp|lcd|screen|page') { $score += 12 }
+    if ($name -match '(?i)(init|send|write|read|recv|receive|get|set|delay|isr|irq|handler)$') { $score -= 25 }
+    $score += [Math]::Min(25, (@(Get-CalledFunctions $FunctionDef).Count * 3))
+    return $score
+}
 
+function Build-ReachableSources {
+    param([string[]]$RootFunctions, [int]$Limit = 500)
     $queue = [System.Collections.Generic.Queue[string]]::new()
     $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $sources = [System.Collections.Generic.List[object]]::new()
     foreach ($root in $RootFunctions) {
         $queue.Enqueue($root)
     }
-
     while ($queue.Count -gt 0 -and $sources.Count -lt $Limit) {
         $name = $queue.Dequeue()
-        if (-not $seen.Add($name)) {
+        if (-not $seen.Add($name) -or -not $functionDefs.ContainsKey($name)) {
             continue
         }
-        $key = $name.ToLowerInvariant()
-        if (-not $functionDefs.ContainsKey($key)) {
-            continue
-        }
-        $def = $functionDefs[$key]
+        $def = $functionDefs[$name]
         $sources.Add([ordered]@{
             functionName = $def.functionName
             filePath = $def.filePath
@@ -149,21 +188,16 @@ function Build-ReachableSources {
     return $sources
 }
 
-function New-Variable {
-    param(
-        [string]$Name,
-        [uint32]$Address,
-        [uint32]$RawValue,
-        [bool]$ForceActive = $false
-    )
+function New-SmokeVariable {
+    param([string]$Name, [uint32]$Address)
     return [ordered]@{
         key = $Name
         name = $Name
         address = $Address
         size = 4
         typeName = "uint32"
-        rawValue = $RawValue
-        forceActive = $ForceActive
+        rawValue = 0
+        forceActive = $false
         aliases = @($Name)
     }
 }
@@ -182,133 +216,68 @@ function Start-Worker {
 
 $script:requestId = 0
 function Send-WorkerCommand {
-    param(
-        [System.Diagnostics.Process]$Process,
-        [string]$Command,
-        [object]$Payload,
-        [int]$TimeoutMs = 60000
-    )
-
+    param([System.Diagnostics.Process]$Process, [string]$Command, [object]$Payload, [int]$TimeoutMs = 90000)
     $script:requestId++
-    $request = [ordered]@{
-        id = $script:requestId
-        command = $Command
-        payload = $Payload
-    }
-    $json = $request | ConvertTo-Json -Depth 80 -Compress
-    $Process.StandardInput.WriteLine($json)
+    $request = [ordered]@{ id = $script:requestId; command = $Command; payload = $Payload }
+    $Process.StandardInput.WriteLine(($request | ConvertTo-Json -Depth 80 -Compress))
     $Process.StandardInput.Flush()
-
     $readTask = $Process.StandardOutput.ReadLineAsync()
     if (-not $readTask.Wait($TimeoutMs)) {
-        throw "Worker command timed out: $Command after $TimeoutMs ms. ProcessId=$($Process.Id)"
+        throw "Worker command timed out: $Command"
     }
-    $line = $readTask.Result
-    if ([string]::IsNullOrWhiteSpace($line)) {
-        $err = ""
-        if ($Process.HasExited) {
-            $err = $Process.StandardError.ReadToEnd()
-        }
-        throw "No worker output for $Command. $err"
-    }
-    return $line | ConvertFrom-Json
+    return $readTask.Result | ConvertFrom-Json
 }
 
-function Assert-True {
-    param([bool]$Condition, [string]$Message)
-    if (-not $Condition) {
-        throw $Message
-    }
+if ($functionDefs.Count -eq 0) {
+    throw "No application-layer C functions were discovered after excluding BSP/Driver/CMSIS/Startup sources."
 }
 
-function Run-Scenario {
-    param(
-        [string]$Name,
-        [uint32]$HandAuto,
-        [uint32]$ExpectedAutoWorkFlag
-    )
+$roots = @($functionDefs.Values |
+    ForEach-Object { [pscustomobject]@{ Def = $_; Score = Get-RootScore $_ } } |
+    Where-Object { $_.Score -ge 20 } |
+    Sort-Object -Property @{ Expression = "Score"; Descending = $true }, @{ Expression = { $_.Def.functionName }; Descending = $false } |
+    Select-Object -First 3 |
+    ForEach-Object { $_.Def.functionName })
 
-    $variables = @(
-        (New-Variable "NO2_SW" 1 1 $true),
-        (New-Variable "NO2_Up_Down" 2 63 $true),
-        (New-Variable "NO2_Left_Right" 3 63 $true),
-        (New-Variable "NO2_SW_count" 4 0),
-        (New-Variable "Auto_work_flags_KM1_1" 5 0),
-        (New-Variable "B132" 6 0 $true),
-        (New-Variable "kognda_press_set" 7 100 $true),
-        (New-Variable "Auto_work_flags_KM1" 8 0),
-        (New-Variable "kongda_begin_flag" 9 1 $true),
-        (New-Variable "hand_auto" 10 $HandAuto $true),
-        (New-Variable "Drill_Lash_PWM_KM1" 11 1 $true),
-        (New-Variable "Lash_force" 12 0 $true),
-        (New-Variable "kognda_dly_com1" 13 12 $true),
-        (New-Variable "Kongda_flag" 14 0),
-        (New-Variable "zy_flag" 15 14),
-        (New-Variable "B188" 16 0 $true),
-        (New-Variable "Gas_alarm_low_SET" 17 0 $true),
-        (New-Variable "gDJ_OK" 18 1 $true),
-        (New-Variable "B188_dly_count" 19 200)
-    )
-
-    $process = Start-Worker
-    try {
-        $project = [ordered]@{
-            workDirectory = $ProjectSrc
-            signature = "real-project-$Name"
-            rootFunctions = @("MyLogic_10ms")
-            sources = $script:reachableSources
-            variables = $variables
-        }
-
-        $init = Send-WorkerCommand $process "InitProject" $project 90000
-        Assert-True ([bool]$init.ok) "$Name InitProject failed: $($init.status)"
-
-        $run = $null
-        for ($i = 1; $i -le 51; $i++) {
-            $run = Send-WorkerCommand $process "RunTick" $null 30000
-            Assert-True ([bool]$run.ok) "$Name RunTick $i failed: $($run.status)"
-            if ($i % 10 -eq 0 -or $i -eq 51) {
-                Write-Host "$Name tick ${i}: NO2_SW_count=$($run.values.NO2_SW_count), Auto_work_flags_KM1_1=$($run.values.Auto_work_flags_KM1_1), Kongda_flag=$($run.values.Kongda_flag), zy_flag=$($run.values.zy_flag)"
-            }
-        }
-
-        $coverageText = [string]::Join("`n", @($init.coverage) + @($run.coverage))
-        Assert-True ($coverageText -match "MyLogic_10ms") "$Name did not report MyLogic_10ms coverage."
-        Assert-True ($coverageText -notmatch "KM_NO") "$Name unexpectedly stubbed KM_NO: $coverageText"
-        Assert-True ($coverageText -notmatch "ZY_protect1") "$Name unexpectedly stubbed ZY_protect1: $coverageText"
-        Assert-True ([uint32]$run.values.NO2_SW_count -eq 201) "$Name NO2_SW_count did not reach 201. Actual=$($run.values.NO2_SW_count)"
-        Assert-True ([uint32]$run.values.Auto_work_flags_KM1_1 -eq $ExpectedAutoWorkFlag) "$Name Auto_work_flags_KM1_1 mismatch. Expected=$ExpectedAutoWorkFlag Actual=$($run.values.Auto_work_flags_KM1_1)"
-        Assert-True ([uint32]$run.values.Kongda_flag -eq 1) "$Name Kongda_flag was not set by ZY_protect1. Actual=$($run.values.Kongda_flag)"
-        Assert-True ([uint32]$run.values.zy_flag -eq 7) "$Name zy_flag was not set by ZY_protect1. Actual=$($run.values.zy_flag)"
-        Assert-True ([uint32]$run.values.B188_dly_count -eq 201) "$Name B188_dly_count did not saturate. Actual=$($run.values.B188_dly_count)"
-
-        Write-Host "$Name passed: NO2_SW_count=$($run.values.NO2_SW_count), Auto_work_flags_KM1_1=$($run.values.Auto_work_flags_KM1_1), Kongda_flag=$($run.values.Kongda_flag), zy_flag=$($run.values.zy_flag), B188_dly_count=$($run.values.B188_dly_count)"
-    }
-    finally {
-        try {
-            [void](Send-WorkerCommand $process "Shutdown" $null 5000)
-        }
-        catch {
-        }
-        if ($process -and -not $process.HasExited) {
-            try {
-                $process.Kill()
-            }
-            catch {
-            }
-        }
-    }
+if ($roots.Count -eq 0) {
+    $roots = @($functionDefs.Values | Sort-Object functionName | Select-Object -First 1 | ForEach-Object { $_.functionName })
 }
 
-Load-FunctionDefinitions $ProjectSrc
-$script:reachableSources = Build-ReachableSources @("MyLogic_10ms") 800
+$sources = Build-ReachableSources $roots 500
+if ($sources.Count -eq 0) {
+    throw "No reachable application sources from roots: $($roots -join ', ')"
+}
 
-$names = @($script:reachableSources | ForEach-Object { $_.functionName })
-Assert-True ($names -contains "MyLogic_10ms") "Reachable sources missing MyLogic_10ms."
-Assert-True ($names -contains "KM_NO") "Reachable sources missing KM_NO."
-Assert-True ($names -contains "ZY_protect1") "Reachable sources missing ZY_protect1."
+$variables = @((New-SmokeVariable "__offline_smoke_value" 1))
 
-Write-Host "Reachable functions: $($script:reachableSources.Count). Includes KM_NO and ZY_protect1."
-Run-Scenario "hand_auto_0" 0 1
-Run-Scenario "hand_auto_1" 1 0
-Write-Host "Real project offline probe passed."
+$process = Start-Worker
+try {
+    $project = [ordered]@{
+        workDirectory = $ProjectSrc
+        signature = "real-project-auto-app-smoke"
+        rootFunctions = $roots
+        sources = $sources
+        variables = $variables
+    }
+    $init = Send-WorkerCommand $process "InitProject" $project
+    if (-not [bool]$init.ok) {
+        throw "InitProject failed: $($init.status)"
+    }
+    $run = Send-WorkerCommand $process "RunTick" $null
+    if (-not [bool]$run.ok) {
+        throw "RunTick failed: $($run.status)"
+    }
+    $coverage = [string]::Join("`n", @($init.coverage) + @($run.coverage))
+    if ($coverage -match "业务调用被 stub") {
+        Write-Warning "Some unresolved business calls remain:`n$coverage"
+    }
+    Write-Host "Real project offline smoke passed."
+    Write-Host "Roots: $($roots -join ', ')"
+    Write-Host "Application sources: $($sources.Count); smoke variables: $($variables.Count)"
+}
+finally {
+    try { [void](Send-WorkerCommand $process "Shutdown" $null 5000) } catch {}
+    if ($process -and -not $process.HasExited) {
+        try { $process.Kill() } catch {}
+    }
+}

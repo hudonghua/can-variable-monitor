@@ -41,12 +41,16 @@ can_monitor_latest.zip
 - `AppUpdateService.cs`：自动更新改为版本字符串不一致即更新，更新失败会弹窗提示。
 - `PublishUnified.ps1`：服务器包精简为两个文件。
 - `MainForm.cs`：代码区、数值显示、主题、函数树联动、在线/离线调试交互仍在持续调整。
-- `CanVariableMonitor.OfflineCWorker/Program.cs`：离线 worker 增加业务函数覆盖诊断和 helper 兜底。
+- `CanVariableMonitor.OfflineCWorker/Program.cs` + `SupportPacks/LPC1765_Keil_AppStubPack.cs`：离线 worker 只执行应用层 C；BSP/Driver/CMSIS/Startup/CAN/ADC/GPIO/UART/Timer/EEPROM 等底层边界自动 stub/mock，不做 LPC1765 寄存器级仿真。
+- `keil_compat.h` 由 AppStubPack 写入 `%LOCALAPPDATA%\CanVariableMonitor\offline_c_worker\...` 临时仿真目录，通过 wrapper 注入；不写客户工程，不要求客户源码 include，在线 CAN 监控完全不依赖它。
+- 离线 worker 不能靠逐个客户工程“调教”；入口由调用图和通用 entry rules 自动发现，UI 可选择并保存项目入口配置；找不到入口时降级静态离线并显示候选/未覆盖诊断。
 - `OfflineWorkerSelfTest.ps1`、`OfflineRealProjectProbe.ps1`：用于离线 worker 本机验证。
 
 ## 当前已知风险
 
 - 离线 C worker 比早期正则模拟更接近真实 C 逻辑，但仍需要用客户真实工程继续探针验证。
+- TinyCC 是离线 C worker 的运行依赖；源码仓库按 `.gitignore` 不提交 `*.exe/*.dll` 和 `CanVariableMonitor/tools/tinycc/`，发布机需要提前放好 `CanVariableMonitor\tools\tinycc`，或保留已解压的 `can_monitor_client_V1.0\offline_c_worker\tinycc` 供发布脚本复制。
+- 2026-06-15 当前方向调整为 AppStubPack：应用层函数真实执行，底层源码不参与编译；缺失底层函数自动 stub/mock，输出边界记录到 coverage，失败时 MainForm 自动回落到静态离线快照。
 - 代码旁数值显示已经多次调整，后续修改时必须优先保证不闪、不抢焦点、不破坏 Ctrl+C 和滚动手感。
 - 在线模式以控制器真实 RAM 为准，不应被离线 worker 逻辑影响。
 - 版本号近期用于测试在线更新，修改版本时要同步确认服务器 manifest。

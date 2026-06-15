@@ -69,13 +69,20 @@ if (Test-Path -LiteralPath $workerProject) {
     dotnet publish $workerProject -c Release -r win-x86 --self-contained false -o $workerPublishDir
 }
 
-$tinyCcSource = Join-Path $projectDir 'tools\tinycc'
-if (Test-Path -LiteralPath $tinyCcSource) {
+$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $projectDir '..'))
+$tinyCcCandidates = @(
+    (Join-Path $projectDir 'tools\tinycc'),
+    (Join-Path $repoRoot 'can_monitor_client_V1.0\offline_c_worker\tinycc')
+)
+$tinyCcSource = $tinyCcCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+if ($tinyCcSource -and (Test-Path -LiteralPath $tinyCcSource)) {
     $tinyCcTarget = Join-Path $workerPublishDir 'tinycc'
     if (-not (Test-Path -LiteralPath $tinyCcTarget)) {
         New-Item -ItemType Directory -Path $tinyCcTarget | Out-Null
     }
     Copy-Item -LiteralPath (Get-ChildItem -LiteralPath $tinyCcSource -Force).FullName -Destination $tinyCcTarget -Recurse -Force
+} else {
+    Write-Warning "TinyCC not found. Offline C simulation will not execute ticks until tinycc is provided in CanVariableMonitor\tools\tinycc or an extracted can_monitor_client_V1.0 package."
 }
 
 $realUpdateConfig = Join-Path $projectDir 'update_config.json'

@@ -52,6 +52,8 @@ public sealed partial class MainForm : Form
 
 	private readonly record struct OfflineWriteTrace(string FunctionName, string FilePath, int LineNumber, string Operation);
 
+	private readonly record struct OfflineRootCandidate(string FunctionName, string Reason, int Score);
+
 	private sealed record OfflineProgramModel(
 		string Directory,
 		string Signature,
@@ -221,6 +223,8 @@ public sealed partial class MainForm : Form
 	private Button _connectButton;
 
 	private Button? _simulationButton;
+
+	private ComboBox? _offlineRootBox;
 
 	private Button _startButton;
 
@@ -450,6 +454,10 @@ public sealed partial class MainForm : Form
 	private string _offlineApplicationSourceDirectory = "";
 
 	private OfflineProgramModel? _offlineProgramModel;
+
+	private string _offlineRootSelectionText = "";
+
+	private bool _offlineRootSelectionUpdating;
 
 	private DateTime _lastOfflineApplicationWatchLogUtc = DateTime.MinValue;
 
@@ -1373,6 +1381,26 @@ public sealed partial class MainForm : Form
 		{
 			ToggleOfflineSimulation();
 		};
+		_offlineRootBox = new ComboBox
+		{
+			Dock = DockStyle.None,
+			DropDownStyle = ComboBoxStyle.DropDown,
+			Width = Ui(210),
+			Height = Ui(26),
+			Margin = new Padding(Ui(2), Ui(2), 0, 0)
+		};
+		_offlineRootBox.Text = "自动入口";
+		StyleComboBox(_offlineRootBox);
+		_offlineRootBox.SelectedIndexChanged += delegate { CommitOfflineRootSelectionFromUi(); };
+		_offlineRootBox.Validated += delegate { CommitOfflineRootSelectionFromUi(); };
+		_offlineRootBox.KeyDown += delegate(object? sender, KeyEventArgs e)
+		{
+			if (e.KeyCode == Keys.Enter)
+			{
+				CommitOfflineRootSelectionFromUi();
+				e.SuppressKeyPress = true;
+			}
+		};
 		FlowLayoutPanel commandPanel = new FlowLayoutPanel
 		{
 			Dock = DockStyle.Fill,
@@ -1410,6 +1438,19 @@ public sealed partial class MainForm : Form
 		tableLayoutPanel.Controls.Add(SmallLabel("目录"), 0, 0);
 		tableLayoutPanel.Controls.Add(_mapPathBox, 1, 0);
 		tableLayoutPanel.Controls.Add(commandPanel, 2, 0);
+		FlowLayoutPanel offlineRootPanel = new FlowLayoutPanel
+		{
+			Dock = DockStyle.Fill,
+			FlowDirection = FlowDirection.LeftToRight,
+			WrapContents = false,
+			Padding = new Padding(0, Ui(3), 0, 0),
+			Margin = Padding.Empty
+		};
+		Label offlineRootLabel = SmallLabel("离线入口");
+		offlineRootLabel.Width = Ui(70);
+		offlineRootPanel.Controls.Add(offlineRootLabel);
+		offlineRootPanel.Controls.Add(_offlineRootBox);
+		tableLayoutPanel.Controls.Add(offlineRootPanel, 3, 0);
 		FlowLayoutPanel flowLayoutPanel = new FlowLayoutPanel
 		{
 			Dock = DockStyle.Fill,
@@ -3283,6 +3324,7 @@ public sealed partial class MainForm : Form
 		}
 		_workDirectory = directory;
 		_mapPathBox.Text = directory;
+		RefreshOfflineRootCandidatesUi(directory);
 		UpdateFirmwareVersionDisplay();
 		Log("工作目录：" + directory);
 		SaveDefaultProfileQuietly();
@@ -5625,7 +5667,8 @@ public sealed partial class MainForm : Form
 			_mapLastWrite.Ticks.ToString(CultureInfo.InvariantCulture),
 			_symbols.Count.ToString(CultureInfo.InvariantCulture),
 			_programGraphLastSourceWrite.Ticks.ToString(CultureInfo.InvariantCulture),
-			_functionIndexRoot
+			_functionIndexRoot,
+			_offlineRootSelectionText
 		]);
 	}
 
@@ -5646,7 +5689,10 @@ public sealed partial class MainForm : Form
 
 		foreach (FunctionSourceView root in roots)
 		{
-			Add(root);
+			if (IsOfflineApplicationSourceFile(directory, root.FilePath))
+			{
+				Add(root);
+			}
 		}
 
 		while (pending.Count > 0 && result.Count < Math.Max(16, limit))
@@ -5659,7 +5705,9 @@ public sealed partial class MainForm : Form
 				{
 					continue;
 				}
-				if (TryLoadFunctionSource(directory, functionName, out FunctionSourceView? child) && child != null)
+				if (TryLoadFunctionSource(directory, functionName, out FunctionSourceView? child) &&
+					child != null &&
+					IsOfflineApplicationSourceFile(directory, child.FilePath))
 				{
 					Add(child);
 				}
@@ -5706,10 +5754,7 @@ public sealed partial class MainForm : Form
 			return false;
 		}
 
-		MapSymbol? symbol = null;
-		if (!_symbolLookup.TryGetValue(identifier, out symbol) &&
-			!_symbolBaseLookup.TryGetValue(identifier, out symbol) &&
-			!_symbolTailLookup.TryGetValue(identifier, out symbol))
+		if (!TryResolveOfflineMapSymbol(identifier, out MapSymbol? symbol) || symbol == null)
 		{
 			return false;
 		}
@@ -5720,6 +5765,37 @@ public sealed partial class MainForm : Form
 		}
 
 		return KeilMapParser.TryResolve(symbol.Name, _symbolLookup, out item, out _);
+	}
+
+	private bool TryResolveOfflineMapSymbol(string identifier, out MapSymbol? symbol)
+	{
+		if (_symbolLookup.TryGetValue(identifier, out symbol))
+		{
+			return true;
+		}
+
+		List<MapSymbol> baseMatches = _symbols
+			.Where(candidate => GetIdentifierBase(candidate.Name).Equals(identifier, StringComparison.OrdinalIgnoreCase))
+			.Take(2)
+			.ToList();
+		if (baseMatches.Count == 1)
+		{
+			symbol = baseMatches[0];
+			return true;
+		}
+
+		List<MapSymbol> tailMatches = _symbols
+			.Where(candidate => GetIdentifierTail(candidate.Name).Equals(identifier, StringComparison.OrdinalIgnoreCase))
+			.Take(2)
+			.ToList();
+		if (tailMatches.Count == 1)
+		{
+			symbol = tailMatches[0];
+			return true;
+		}
+
+		symbol = null;
+		return false;
 	}
 
 	private Dictionary<string, IReadOnlyList<OfflineWriteTrace>> BuildOfflineWriteTraceIndex(
@@ -5821,110 +5897,387 @@ public sealed partial class MainForm : Form
 
 	private List<FunctionSourceView> BuildOfflineApplicationSources(string directory, bool includeAnalysisSeeds)
 	{
+		List<OfflineRootCandidate> candidates = BuildOfflineRootCandidates(directory, includeAnalysisSeeds);
 		var sources = new List<FunctionSourceView>();
 		var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-		bool TryAdd(string functionName)
+		int limit = includeAnalysisSeeds ? 36 : 12;
+		foreach (OfflineRootCandidate candidate in candidates)
 		{
-			if (string.IsNullOrWhiteSpace(functionName) ||
-				IsCKeyword(functionName) ||
-				!seen.Add(functionName))
+			if (sources.Count >= limit)
 			{
-				return false;
+				break;
 			}
-
-			if (!TryLoadFunctionSource(directory, functionName, out FunctionSourceView? source) || source == null)
+			if (seen.Contains(candidate.FunctionName))
 			{
-				return false;
+				continue;
 			}
-
-			sources.Add(source);
-			return true;
+			if (TryLoadFunctionSource(directory, candidate.FunctionName, out FunctionSourceView? source) && source != null)
+			{
+				seen.Add(candidate.FunctionName);
+				sources.Add(source);
+			}
 		}
 
-		int primaryCount = 0;
-		foreach (string name in new[]
+		if (sources.Count == 0 && _currentFunctionSource != null)
 		{
-			"MyLogic_1ms",
-			"MyLogic_10ms",
-			"MyLogic",
-			"Disp_main",
-			"LCD_Disp",
-			"Lcd_Disp",
-			"App_Display",
-			"Main_Display"
-		})
+			sources.Add(_currentFunctionSource);
+			LogOfflineCWorkerIssue("离线静态模式：未自动确认应用入口，已使用当前函数作为观察入口。", force: true);
+		}
+		else if (sources.Count == 0)
 		{
-			if (TryAdd(name))
+			LogOfflineCWorkerIssue("离线静态模式：未自动确认应用入口；请从候选入口中选择后再启用仿真。", force: true);
+		}
+
+		return sources;
+	}
+
+	private List<OfflineRootCandidate> BuildOfflineRootCandidates(string directory, bool includeAnalysisSeeds)
+	{
+		var candidates = new Dictionary<string, OfflineRootCandidate>(StringComparer.OrdinalIgnoreCase);
+
+		void AddCandidate(string functionName, string reason, int score)
+		{
+			if (string.IsNullOrWhiteSpace(functionName) || IsCKeyword(functionName))
 			{
-				primaryCount++;
+				return;
 			}
+			if (!TryLoadFunctionSource(directory, functionName, out FunctionSourceView? source) || source == null)
+			{
+				return;
+			}
+			if (!IsOfflineApplicationSourceFile(directory, source.FilePath))
+			{
+				return;
+			}
+
+			if (candidates.TryGetValue(source.FunctionName, out OfflineRootCandidate existing) &&
+				existing.Score >= score)
+			{
+				return;
+			}
+
+			candidates[source.FunctionName] = new OfflineRootCandidate(source.FunctionName, reason, score);
+		}
+
+		foreach (string configuredRoot in GetConfiguredOfflineRootNames())
+		{
+			AddCandidate(configuredRoot, "项目配置", 1000);
+		}
+
+		if (_currentFunctionSource != null &&
+			_currentFunctionSource.FilePath.StartsWith(directory, StringComparison.OrdinalIgnoreCase))
+		{
+			AddCandidate(_currentFunctionSource.FunctionName, "当前观察函数", includeAnalysisSeeds ? 55 : 35);
 		}
 
 		foreach (string name in FindOfflineDisplayTaskEntries(directory))
 		{
-			if (TryAdd(name))
-			{
-				primaryCount++;
-			}
+			AddCandidate(name, "任务函数指针赋值", 70);
 		}
 
 		ProgramGraphSnapshot? snapshot = _programGraphSnapshot;
 		if (snapshot != null && snapshot.Success)
 		{
-			ProgramCallGraphNode? controlRoot = FindControlBusinessRoot(snapshot.CallGraphNodes);
-			if (controlRoot != null && (includeAnalysisSeeds || primaryCount == 0))
+			IReadOnlyList<ProgramCallGraphNode> graphNodes = GetAllGraphNodes(snapshot);
+			foreach (ProgramCallGraphNode node in graphNodes)
 			{
-				TryAdd(controlRoot.Name);
-			}
-
-			if (includeAnalysisSeeds || primaryCount == 0)
-			{
-				foreach (ProgramCallGraphNode displayRoot in FindDisplayRoots(snapshot.CallGraphNodes).Take(16))
+				if (IsProgramGraphNoiseNode(node))
 				{
-					TryAdd(displayRoot.Name);
+					continue;
+				}
+				int score = ScoreOfflineRootCandidate(node, includeAnalysisSeeds);
+				if (score >= (includeAnalysisSeeds ? 35 : 45))
+				{
+					AddCandidate(node.Name, OfflineRootReason(node), score);
 				}
 			}
 
-			if (primaryCount == 0)
+			if (!string.IsNullOrWhiteSpace(snapshot.StartFunction))
 			{
-				TryAdd(snapshot.StartFunction);
-				foreach (ProgramFrameworkStep step in snapshot.FrameworkSteps.Take(16))
-				{
-					TryAdd(step.FunctionName);
-					TryAdd(step.Name);
-					if (sources.Count >= 18)
-					{
-						break;
-					}
-				}
+				int startScore = snapshot.StartFunction.Equals("main", StringComparison.OrdinalIgnoreCase)
+					? 25
+					: (includeAnalysisSeeds ? 65 : 80);
+				AddCandidate(snapshot.StartFunction, "程序图谱首选入口", startScore);
+			}
 
-				foreach (ProgramCallGraphNode node in snapshot.CallGraphNodes
-					.Where(node => node.Level <= 1 && !node.Kind.Equals("driver", StringComparison.OrdinalIgnoreCase))
-					.Take(16))
+			foreach (ProgramFrameworkStep step in snapshot.FrameworkSteps)
+			{
+				AddCandidate(step.FunctionName, "框架步骤", includeAnalysisSeeds ? 52 : 60);
+				if (includeAnalysisSeeds)
 				{
-					TryAdd(node.Name);
-					if (sources.Count >= 18)
-					{
-						break;
-					}
+					AddCandidate(step.Name, "框架步骤别名", 38);
 				}
 			}
 
 			if (includeAnalysisSeeds)
 			{
-				foreach (ProgramFunctionInfo function in snapshot.HotFunctions.Take(12))
+				foreach (ProgramFunctionInfo function in snapshot.HotFunctions.Take(24))
 				{
-					TryAdd(function.Name);
-					if (sources.Count >= 24)
-					{
-						break;
-					}
+					AddCandidate(function.Name, "高频调用函数", 36 + Math.Min(function.Outgoing, 12));
 				}
 			}
 		}
 
-		return sources;
+		if (candidates.Count == 0)
+		{
+			EnsureFunctionIndex(directory);
+			foreach (FunctionIndexEntry entry in _functionIndex.Values
+				.Select(entry => new { Entry = entry, Score = ScoreOfflineRootName(entry.Name, entry.FilePath) })
+				.Where(item => item.Score >= 30)
+				.OrderByDescending(item => item.Score)
+				.ThenBy(item => item.Entry.Name, StringComparer.OrdinalIgnoreCase)
+				.Take(24)
+				.Select(item => item.Entry))
+			{
+				AddCandidate(entry.Name, "源码函数名候选", 30);
+			}
+		}
+
+		List<OfflineRootCandidate> result = candidates.Values
+			.OrderByDescending(candidate => candidate.Score)
+			.ThenBy(candidate => candidate.FunctionName, StringComparer.OrdinalIgnoreCase)
+			.ToList();
+		if (result.Count > 0)
+		{
+			string summary = string.Join(", ", result.Take(8).Select(candidate => candidate.FunctionName + ":" + candidate.Reason));
+			LogOfflineCWorkerIssue("离线入口候选：" + summary, force: false);
+		}
+		return result;
+	}
+
+	private void RefreshOfflineRootCandidatesUi(string directory)
+	{
+		if (_offlineRootBox == null || _offlineRootBox.IsDisposed)
+		{
+			return;
+		}
+
+		_offlineRootSelectionUpdating = true;
+		try
+		{
+			string currentText = GetOfflineRootSelectionDisplayText();
+			_offlineRootBox.Items.Clear();
+			_offlineRootBox.Items.Add("自动入口");
+			foreach (string configuredRoot in GetConfiguredOfflineRootNames())
+			{
+				if (!_offlineRootBox.Items.Contains(configuredRoot))
+				{
+					_offlineRootBox.Items.Add(configuredRoot);
+				}
+			}
+			if (!string.IsNullOrWhiteSpace(directory) && Directory.Exists(directory))
+			{
+				foreach (OfflineRootCandidate candidate in BuildOfflineRootCandidates(directory, includeAnalysisSeeds: false).Take(24))
+				{
+					if (!_offlineRootBox.Items.Contains(candidate.FunctionName))
+					{
+						_offlineRootBox.Items.Add(candidate.FunctionName);
+					}
+				}
+			}
+			_offlineRootBox.Text = currentText;
+		}
+		finally
+		{
+			_offlineRootSelectionUpdating = false;
+		}
+	}
+
+	private void CommitOfflineRootSelectionFromUi()
+	{
+		if (_offlineRootSelectionUpdating || _offlineRootBox == null)
+		{
+			return;
+		}
+
+		string normalized = NormalizeOfflineRootSelectionText(_offlineRootBox.Text);
+		if (_offlineRootSelectionText.Equals(normalized, StringComparison.Ordinal))
+		{
+			return;
+		}
+
+		_offlineRootSelectionText = normalized;
+		ApplyOfflineRootSelectionToUi();
+		ClearOfflineSimulationProgramCache();
+		SaveDefaultProfileQuietly();
+		Log(_offlineRootSelectionText.Length == 0
+			? "离线入口：自动发现。"
+			: "离线入口：使用项目配置 " + _offlineRootSelectionText + "。");
+	}
+
+	private void ApplyOfflineRootSelectionToUi()
+	{
+		if (_offlineRootBox == null || _offlineRootBox.IsDisposed)
+		{
+			return;
+		}
+
+		_offlineRootSelectionUpdating = true;
+		try
+		{
+			_offlineRootBox.Text = GetOfflineRootSelectionDisplayText();
+		}
+		finally
+		{
+			_offlineRootSelectionUpdating = false;
+		}
+	}
+
+	private string GetOfflineRootSelectionDisplayText()
+	{
+		return _offlineRootSelectionText.Length == 0 ? "自动入口" : _offlineRootSelectionText;
+	}
+
+	private IReadOnlyList<string> GetConfiguredOfflineRootNames()
+	{
+		return ParseOfflineRootNames(_offlineRootSelectionText);
+	}
+
+	private static string NormalizeOfflineRootSelectionText(string text)
+	{
+		return string.Join(", ", ParseOfflineRootNames(text));
+	}
+
+	private static List<string> ParseOfflineRootNames(string text)
+	{
+		if (string.IsNullOrWhiteSpace(text) ||
+			text.Trim().Equals("自动入口", StringComparison.OrdinalIgnoreCase) ||
+			text.Trim().Equals("auto", StringComparison.OrdinalIgnoreCase))
+		{
+			return new List<string>();
+		}
+
+		return Regex.Split(text, @"[,，;；\r\n]+")
+			.Select(part => part.Trim())
+			.Where(part => part.Length > 0 && Regex.IsMatch(part, @"^[A-Za-z_][A-Za-z0-9_]*$"))
+			.Distinct(StringComparer.OrdinalIgnoreCase)
+			.ToList();
+	}
+
+	private static bool IsOfflineApplicationSourceFile(string root, string filePath)
+	{
+		if (string.IsNullOrWhiteSpace(filePath))
+		{
+			return false;
+		}
+
+		string extension = Path.GetExtension(filePath);
+		if (!extension.Equals(".c", StringComparison.OrdinalIgnoreCase) &&
+			!extension.Equals(".h", StringComparison.OrdinalIgnoreCase))
+		{
+			return false;
+		}
+
+		string relative = GetRelativePathSafe(root, filePath).Replace('\\', '/');
+		string[] segments = relative.Split('/', StringSplitOptions.RemoveEmptyEntries);
+		string[] excludedDirectories =
+		{
+			"bsp", "driver", "drivers", "cmsis", "startup", "system", "hal", "rte", "core",
+			"periph", "peripheral", "uart", "usart", "adc", "gpio", "can", "timer", "tim",
+			"eeprom", "flash", "i2c", "spi", "pwm", "usb", "eth", "objects", "listings"
+		};
+		if (segments.Take(Math.Max(0, segments.Length - 1)).Any(segment =>
+			excludedDirectories.Contains(segment, StringComparer.OrdinalIgnoreCase)))
+		{
+			return false;
+		}
+
+		string fileName = Path.GetFileNameWithoutExtension(filePath);
+		string[] excludedPrefixes =
+		{
+			"startup", "system_lpc17", "core_cm", "lpc17xx", "bsp", "driver",
+			"gpio", "uart", "usart", "adc", "can", "timer", "tim", "eeprom", "flash",
+			"i2c", "spi", "pwm"
+		};
+		return !excludedPrefixes.Any(prefix => fileName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+	}
+
+	private static int ScoreOfflineRootCandidate(ProgramCallGraphNode node, bool includeAnalysisSeeds)
+	{
+		int score = ScoreOfflineRootName(node.Name, node.FilePath);
+		if (node.Incoming == 0 && node.Outgoing > 0)
+		{
+			score += 35;
+		}
+		if (node.Outgoing >= 2)
+		{
+			score += Math.Min(25, node.Outgoing * 3);
+		}
+		if (node.Kind.Equals("main", StringComparison.OrdinalIgnoreCase))
+		{
+			score += 35;
+		}
+		if (node.Kind.Equals("period10", StringComparison.OrdinalIgnoreCase) ||
+			node.Kind.Equals("timer", StringComparison.OrdinalIgnoreCase) ||
+			node.Kind.Equals("business", StringComparison.OrdinalIgnoreCase) ||
+			node.Kind.Equals("io", StringComparison.OrdinalIgnoreCase))
+		{
+			score += 28;
+		}
+		if (node.Kind.Equals("disp", StringComparison.OrdinalIgnoreCase))
+		{
+			score += includeAnalysisSeeds ? 28 : 18;
+		}
+		if (node.Kind.Equals("driver", StringComparison.OrdinalIgnoreCase) ||
+			node.Kind.Equals("storage", StringComparison.OrdinalIgnoreCase))
+		{
+			score -= 45;
+		}
+		return score;
+	}
+
+	private static int ScoreOfflineRootName(string functionName, string filePath)
+	{
+		string text = functionName + " " + filePath;
+		int score = 0;
+		if (Regex.IsMatch(functionName, @"(?:^|_)(?:loop|task|tick|logic|ctrl|control|work|process|scan|cycle)(?:_|$)", RegexOptions.IgnoreCase))
+		{
+			score += 35;
+		}
+		if (functionName.Equals("main", StringComparison.OrdinalIgnoreCase))
+		{
+			score -= 35;
+		}
+		if (Regex.IsMatch(functionName, @"\b\d+\s*ms\b|(?:^|_)\d+ms(?:_|$)", RegexOptions.IgnoreCase))
+		{
+			score += 25;
+		}
+		if (Regex.IsMatch(text, @"display|disp|lcd|screen|page", RegexOptions.IgnoreCase))
+		{
+			score += 22;
+		}
+		if (Regex.IsMatch(text, @"app|usr|user|business|logic|control|ctrl", RegexOptions.IgnoreCase))
+		{
+			score += 18;
+		}
+		if (Regex.IsMatch(functionName, @"(?:init|send|write|read|recv|receive|get|set|delay|isr|irq|handler)$", RegexOptions.IgnoreCase))
+		{
+			score -= 25;
+		}
+		if (Regex.IsMatch(text, @"driver|hal|bsp|startup|system|i2c|spi|uart|can|adc|pwm|gpio|timer", RegexOptions.IgnoreCase))
+		{
+			score -= 12;
+		}
+		return score;
+	}
+
+	private static string OfflineRootReason(ProgramCallGraphNode node)
+	{
+		if (node.Incoming == 0 && node.Outgoing > 0)
+		{
+			return "调用图根节点";
+		}
+		if (node.Kind.Equals("disp", StringComparison.OrdinalIgnoreCase))
+		{
+			return "显示候选";
+		}
+		if (node.Kind.Equals("main", StringComparison.OrdinalIgnoreCase) ||
+			node.Kind.Equals("period10", StringComparison.OrdinalIgnoreCase) ||
+			node.Kind.Equals("timer", StringComparison.OrdinalIgnoreCase))
+		{
+			return "调度候选";
+		}
+		return "业务候选";
 	}
 
 	private IEnumerable<string> FindOfflineDisplayTaskEntries(string directory)
@@ -14326,7 +14679,7 @@ public sealed partial class MainForm : Form
 		{
 			return "sample-call";
 		}
-		if (ContainsAny(text, "KM_NO", "_DO", "DO_", "PWM", "Motor", "Pump", "Valve", "Relay"))
+		if (ContainsAny(text, "_DO", "DO_", "PWM", "Motor", "Pump", "Valve", "Relay", "Output"))
 		{
 			return "output-call";
 		}
@@ -14906,13 +15259,9 @@ public sealed partial class MainForm : Form
 				return "读取关键业务变量并更新" + signalNames + "等结果变量";
 			}
 		}
-		if (name.Equals("MyLogic_10ms", StringComparison.OrdinalIgnoreCase))
+		if (ContainsAny(name, "10ms", "1ms", "Tick", "Loop", "Task", "Cycle"))
 		{
-			return "10ms周期业务入口，集中调度输入处理、状态判断和输出刷新";
-		}
-		if (name.Equals("MyLogic_1ms", StringComparison.OrdinalIgnoreCase))
-		{
-			return "1ms快速业务入口，处理高频计时、边沿和即时状态";
+			return "周期或任务入口，集中调度输入处理、状态判断和输出刷新";
 		}
 		if (ContainsAny(all, "LCD_WR_Data2B", "_LCD", "Disp", "Display", "Page"))
 		{
@@ -14996,11 +15345,7 @@ public sealed partial class MainForm : Form
 		}
 
 		string prefix;
-		if (name.Equals("MyLogic_10ms", StringComparison.OrdinalIgnoreCase))
-		{
-			prefix = "作为10ms业务总入口";
-		}
-		else if (callers.Count > 0)
+		if (callers.Count > 0)
 		{
 			string caller = callers[0].Name;
 			prefix = string.IsNullOrWhiteSpace(layerText)
@@ -15028,7 +15373,7 @@ public sealed partial class MainForm : Form
 	private string InferEngineeringFunctionRole(FunctionSourceView source, FunctionLogicAnalysis analysis, string activeText, int calleeCount)
 	{
 		string name = source.FunctionName;
-		if (name.Equals("MyLogic_10ms", StringComparison.OrdinalIgnoreCase))
+		if (ContainsAny(name, "10ms", "1ms", "Tick", "Loop", "Task", "Cycle"))
 		{
 			return "按周期组织输入处理、状态判断、输出刷新和显示通信";
 		}
@@ -15296,7 +15641,7 @@ public sealed partial class MainForm : Form
 			{
 				HashSet<string> seen = controlPath.Select(n => n.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
 				List<ProgramCallGraphNode> forward = BuildPrimaryForwardCallPath(currentNode, seen, 5);
-				AddLinearChain("10ms业务链", "control", controlPath.Concat(forward).DistinctBy(n => n.Id).ToList());
+				AddLinearChain("控制/业务链", "control", controlPath.Concat(forward).DistinctBy(n => n.Id).ToList());
 			}
 		}
 
@@ -15305,7 +15650,7 @@ public sealed partial class MainForm : Form
 		{
 			AddGap();
 			FlowChartNode? displayHeader = AddHeader(
-				displayRoots.Any(n => n.Name.Equals("Disp_main", StringComparison.OrdinalIgnoreCase)) ? "200屏显示链" : "显示输出集合",
+				"显示输出集合",
 				"display:header");
 			var displayVisited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 			foreach (ProgramCallGraphNode displayRoot in displayRoots)
@@ -15356,19 +15701,13 @@ public sealed partial class MainForm : Form
 
 	private static ProgramCallGraphNode? FindControlBusinessRoot(IReadOnlyList<ProgramCallGraphNode> graphNodes)
 	{
-		string[] exactNames = { "MyLogic_10ms", "work_logic", "Work_Logic", "WORK_LOGIC" };
-		foreach (string name in exactNames)
-		{
-			ProgramCallGraphNode? exact = graphNodes.FirstOrDefault(n => n.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
-			if (exact != null)
-			{
-				return exact;
-			}
-		}
-
 		return graphNodes
-			.Where(n => n.Kind.Equals("period10", StringComparison.OrdinalIgnoreCase) || n.Name.Contains("10ms", StringComparison.OrdinalIgnoreCase))
-			.OrderByDescending(n => n.Outgoing)
+			.Where(n => !IsProgramGraphNoiseNode(n))
+			.Where(n => !n.Kind.Equals("driver", StringComparison.OrdinalIgnoreCase) && !n.Kind.Equals("storage", StringComparison.OrdinalIgnoreCase))
+			.Where(n => n.Outgoing > 0)
+			.OrderByDescending(n => ScoreOfflineRootCandidate(n, includeAnalysisSeeds: false))
+			.ThenBy(n => n.Level)
+			.ThenByDescending(n => n.Outgoing)
 			.ThenBy(n => n.Name, StringComparer.OrdinalIgnoreCase)
 			.FirstOrDefault()
 			?? FindPrimaryChartRoot(graphNodes);
@@ -15376,14 +15715,9 @@ public sealed partial class MainForm : Form
 
 	private static IReadOnlyList<ProgramCallGraphNode> FindDisplayRoots(IReadOnlyList<ProgramCallGraphNode> graphNodes)
 	{
-		ProgramCallGraphNode? dispMain = graphNodes.FirstOrDefault(n => n.Name.Equals("Disp_main", StringComparison.OrdinalIgnoreCase));
-		if (dispMain != null)
-		{
-			return new[] { dispMain };
-		}
-
 		return graphNodes
 			.Where(IsDisplayGraphNode)
+			.Where(n => !IsProgramGraphNoiseNode(n))
 			.OrderByDescending(n => n.Outgoing)
 			.ThenBy(n => n.FilePath, StringComparer.OrdinalIgnoreCase)
 			.ThenBy(n => n.Name, StringComparer.OrdinalIgnoreCase)
@@ -15395,7 +15729,6 @@ public sealed partial class MainForm : Form
 	{
 		string text = node.Name + " " + node.Kind + " " + node.Summary + " " + node.FilePath;
 		return node.Kind.Equals("disp", StringComparison.OrdinalIgnoreCase) ||
-			text.Contains("Disp_main", StringComparison.OrdinalIgnoreCase) ||
 			text.Contains("LCD_WR_Data2B", StringComparison.OrdinalIgnoreCase) ||
 			text.Contains("Display", StringComparison.OrdinalIgnoreCase) ||
 			text.Contains("Disp", StringComparison.OrdinalIgnoreCase) ||
@@ -15611,7 +15944,7 @@ public sealed partial class MainForm : Form
 			blocks.Add(new FunctionLogicStep(title, ShortenAnalysisText(detail, 74), kind, functionName, Math.Max(1, line)));
 		}
 
-		if (callees.Count > 0 && (source.FunctionName.Equals("MyLogic_10ms", StringComparison.OrdinalIgnoreCase) || callees.Count >= 2))
+		if (callees.Count > 0 && (IsPreferredGraphRootName(source.FunctionName) || callees.Count >= 2))
 		{
 			string detail = string.Join("、", callees.Take(4).Select(node => node.Name));
 			AddBlock("调度下级", detail, "period10", source.StartLine, callees[0].Name);
@@ -15736,7 +16069,7 @@ public sealed partial class MainForm : Form
 
 	private static string InferFunctionNodeKind(string functionName, FunctionLogicAnalysis analysis)
 	{
-		if (functionName.Equals("MyLogic_10ms", StringComparison.OrdinalIgnoreCase) || functionName.Contains("10ms", StringComparison.OrdinalIgnoreCase))
+		if (IsPreferredGraphRootName(functionName))
 		{
 			return "period10";
 		}
@@ -19513,6 +19846,7 @@ public sealed partial class MainForm : Form
 		_programGraphLastSourceWrite = latestWrite;
 		_programGraphSourceCount = sourceCount;
 		_programGraphSnapshot = programGraphSnapshot;
+		RefreshOfflineRootCandidatesUi(directory);
 		ClearOfflineSimulationProgramCache();
 		if (_offlineSimulation)
 		{
@@ -19587,41 +19921,12 @@ public sealed partial class MainForm : Form
 		}
 
 		return string.IsNullOrWhiteSpace(fallback) || fallback.Equals("自动识别", StringComparison.OrdinalIgnoreCase)
-			? "MyLogic_10ms"
+			? "自动识别"
 			: fallback;
 	}
 
 	private static string FindPreferredEntryName(ProgramGraphSnapshot snapshot)
 	{
-		string[] preferredNames = { "MyLogic_10ms" };
-		foreach (string preferred in preferredNames)
-		{
-			ProgramFrameworkStep? stepMatch = snapshot.FrameworkSteps.FirstOrDefault(step =>
-				step.Name.Equals(preferred, StringComparison.OrdinalIgnoreCase) ||
-				step.FunctionName.Equals(preferred, StringComparison.OrdinalIgnoreCase));
-			string match = stepMatch?.Name ?? stepMatch?.FunctionName ?? "";
-			if (!string.IsNullOrWhiteSpace(match))
-			{
-				return match;
-			}
-
-			ProgramFunctionInfo? functionMatch = snapshot.FlowFunctions.FirstOrDefault(function =>
-				function.Name.Equals(preferred, StringComparison.OrdinalIgnoreCase));
-			match = functionMatch?.Name ?? "";
-			if (!string.IsNullOrWhiteSpace(match))
-			{
-				return match;
-			}
-
-			ProgramCallGraphNode? nodeMatch = snapshot.CallGraphNodes.FirstOrDefault(node =>
-				node.Name.Equals(preferred, StringComparison.OrdinalIgnoreCase));
-			match = nodeMatch?.Name ?? "";
-			if (!string.IsNullOrWhiteSpace(match))
-			{
-				return match;
-			}
-		}
-
 		if (!string.IsNullOrWhiteSpace(snapshot.StartFunction))
 		{
 			return snapshot.StartFunction;
@@ -19927,7 +20232,7 @@ public sealed partial class MainForm : Form
 		}
 
 		ProgramCallGraphNode? controlRoot = FindControlBusinessRoot(visibleGraphNodes);
-		FlowChartNode controlHeader = AddHeader("control:header", "MyLogic_10ms 控制链", controlLeft, ref controlRow);
+		FlowChartNode controlHeader = AddHeader("control:header", "控制/业务链", controlLeft, ref controlRow);
 		if (controlRoot != null)
 		{
 			AddTree("control", controlRoot, 0, "", "", controlLeft, ref controlRow, new HashSet<string>(StringComparer.OrdinalIgnoreCase), GetControlChildren, controlHeader);
@@ -19954,7 +20259,7 @@ public sealed partial class MainForm : Form
 		{
 			FlowChartNode displayHeader = AddHeader(
 				"display:header",
-				displayRoots.Any(n => n.Name.Equals("Disp_main", StringComparison.OrdinalIgnoreCase)) ? "200屏 / 显示链" : "显示输出集合",
+				"显示输出集合",
 				displayLeft,
 				ref displayRow);
 			foreach (ProgramCallGraphNode displayRoot in displayRoots.Take(80))
@@ -20052,25 +20357,10 @@ public sealed partial class MainForm : Form
 
 	private static ProgramCallGraphNode? FindPrimaryChartRoot(IReadOnlyList<ProgramCallGraphNode> graphNodes)
 	{
-		ProgramCallGraphNode? exact10ms = graphNodes.FirstOrDefault(n => n.Name.Equals("MyLogic_10ms", StringComparison.OrdinalIgnoreCase));
-		if (exact10ms != null)
-		{
-			return exact10ms;
-		}
-
-		ProgramCallGraphNode? period10 = graphNodes
-			.Where(n => n.Kind.Equals("period10", StringComparison.OrdinalIgnoreCase) || n.Name.Contains("10ms", StringComparison.OrdinalIgnoreCase))
-			.OrderByDescending(n => n.Outgoing)
-			.ThenBy(n => n.Name, StringComparer.OrdinalIgnoreCase)
-			.FirstOrDefault();
-		if (period10 != null)
-		{
-			return period10;
-		}
-
 		return graphNodes
 			.Where(IsPreferredGraphRoot)
-			.OrderBy(n => n.Level)
+			.OrderByDescending(n => ScoreOfflineRootCandidate(n, includeAnalysisSeeds: false))
+			.ThenBy(n => n.Level)
 			.ThenByDescending(n => n.Outgoing)
 			.ThenBy(n => n.Name, StringComparer.OrdinalIgnoreCase)
 			.FirstOrDefault()
@@ -20128,10 +20418,20 @@ public sealed partial class MainForm : Form
 
 	private static bool IsPreferredGraphRoot(ProgramCallGraphNode node)
 	{
-		return node.Name.Equals("MyLogic_10ms", StringComparison.OrdinalIgnoreCase) ||
-			node.Name.Contains("10ms", StringComparison.OrdinalIgnoreCase) ||
-			node.Name.Contains("Loop", StringComparison.OrdinalIgnoreCase) ||
+		return IsPreferredGraphRootName(node.Name) ||
 			node.Kind.Equals("period10", StringComparison.OrdinalIgnoreCase);
+	}
+
+	private static bool IsPreferredGraphRootName(string name)
+	{
+		return name.Contains("10ms", StringComparison.OrdinalIgnoreCase) ||
+			name.Contains("Loop", StringComparison.OrdinalIgnoreCase) ||
+			name.Contains("Logic", StringComparison.OrdinalIgnoreCase) ||
+			name.Contains("Task", StringComparison.OrdinalIgnoreCase) ||
+			name.Contains("Tick", StringComparison.OrdinalIgnoreCase) ||
+			name.Contains("Cycle", StringComparison.OrdinalIgnoreCase) ||
+			name.Contains("Control", StringComparison.OrdinalIgnoreCase) ||
+			name.Contains("Ctrl", StringComparison.OrdinalIgnoreCase);
 	}
 
 	private static int ChartColumnIndex(int hierarchyLevel)
@@ -20357,7 +20657,8 @@ public sealed partial class MainForm : Form
 		}
 		if (combined.Contains("10ms", StringComparison.OrdinalIgnoreCase) ||
 			combined.Contains("T010ms", StringComparison.OrdinalIgnoreCase) ||
-			combined.Contains("MyLogic_10ms", StringComparison.OrdinalIgnoreCase))
+			combined.Contains("tick", StringComparison.OrdinalIgnoreCase) ||
+			combined.Contains("cycle", StringComparison.OrdinalIgnoreCase))
 		{
 			return "period10";
 		}
@@ -20701,6 +21002,7 @@ public sealed partial class MainForm : Form
 			FunctionCodeFontSize = _functionCodeFontSize,
 			ProgramTreeFontSize = _programTreeFontSize,
 			MonitorColumnWidths = columnWidths,
+			OfflineRootFunctions = GetConfiguredOfflineRootNames().ToList(),
 			Variables = BuildProfileVariables()
 		};
 	}
@@ -20862,6 +21164,10 @@ public sealed partial class MainForm : Form
 			_intervalBox.Value = Math.Clamp(monitorProfile.PollIntervalMs, (int)_intervalBox.Minimum, (int)_intervalBox.Maximum);
 			_targetCycleMs = (int)_intervalBox.Value;
 			_showHexValue = monitorProfile.ShowHexValue;
+			_offlineRootSelectionText = string.Join(", ", monitorProfile.OfflineRootFunctions
+				.Where(name => !string.IsNullOrWhiteSpace(name))
+				.Distinct(StringComparer.OrdinalIgnoreCase));
+			ApplyOfflineRootSelectionToUi();
 			_functionCodeFontSize = Math.Clamp(monitorProfile.FunctionCodeFontSize, 8f, 22f);
 			_programTreeFontSize = Math.Clamp(monitorProfile.ProgramTreeFontSize <= 0 ? 15f : monitorProfile.ProgramTreeFontSize, 10f, 22f);
 			if (_functionCodeBox != null)

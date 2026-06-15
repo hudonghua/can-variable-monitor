@@ -140,6 +140,7 @@ internal static class Program
         string sourcePath = Path.Combine(State.WorkDirectory, "canmon_tick.c");
         Dictionary<string, uint> activeForceValues = BuildActiveForceValues();
         string cSource = SimulationCGenerator.Generate(State.Project, State.Values, activeForceValues);
+        SimulationCGenerator.WriteSupportFiles(State.WorkDirectory);
         foreach (string note in SimulationCGenerator.LastCoverageNotes)
         {
             AddCoverageOnce(note);
@@ -178,6 +179,10 @@ internal static class Program
             OfflineWorkerVariablePayload? variable = State.Project.Variables.FirstOrDefault(v => v.Key.Equals(key, StringComparison.OrdinalIgnoreCase));
             int size = variable?.Size ?? 4;
             State.Values[key] = Mask(value, size);
+        }
+        foreach (string outputEvent in ParseOutputEvents(output).Take(24))
+        {
+            AddCoverageOnce("离线输出记录：" + outputEvent);
         }
         State.OneShotForceValues.Clear();
 
@@ -397,6 +402,22 @@ internal static class Program
         return values;
     }
 
+    private static IEnumerable<string> ParseOutputEvents(string text)
+    {
+        foreach (string rawLine in text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
+        {
+            string line = rawLine.Trim();
+            if (line.StartsWith("__CANMON_OUTPUT__ ", StringComparison.Ordinal))
+            {
+                string name = line.Substring("__CANMON_OUTPUT__ ".Length).Trim();
+                if (name.Length > 0)
+                {
+                    yield return name;
+                }
+            }
+        }
+    }
+
     private static uint Mask(uint value, int size)
     {
         int bytes = Math.Clamp(size, 1, 4);
@@ -450,7 +471,8 @@ internal static class TinyCcLocator
             Path.GetFullPath(Path.Combine(baseDir, "..", "tinycc", "tcc.exe")),
             Path.GetFullPath(Path.Combine(baseDir, "..", "..", "tools", "tinycc", "tcc.exe")),
             Path.GetFullPath(Path.Combine(baseDir, "..", "..", "..", "tools", "tinycc", "tcc.exe")),
-            Path.GetFullPath(Path.Combine(baseDir, "..", "..", "..", "..", "CanVariableMonitor", "tools", "tinycc", "tcc.exe"))
+            Path.GetFullPath(Path.Combine(baseDir, "..", "..", "..", "..", "CanVariableMonitor", "tools", "tinycc", "tcc.exe")),
+            Path.GetFullPath(Path.Combine(baseDir, "..", "..", "..", "..", "can_monitor_client_V1.0", "offline_c_worker", "tinycc", "tcc.exe"))
         ];
 
         foreach (string candidate in candidates)
@@ -488,35 +510,12 @@ internal static class SimulationCGenerator
 
     public static IReadOnlyList<string> LastCoverageNotes => _lastCoverageNotes;
 
-    private static readonly HashSet<string> CKeywords = new(StringComparer.Ordinal)
-    {
-        "if", "else", "for", "while", "do", "switch", "case", "default", "return", "sizeof",
-        "typedef", "struct", "union", "enum", "static", "extern", "const", "volatile", "break",
-        "continue", "goto", "void", "int", "char", "short", "long", "float", "double", "signed",
-        "unsigned", "auto", "register", "true", "false", "NULL",
-        "__irq", "__weak", "__IO", "__I", "__O", "__packed", "__align", "__attribute__", "__asm", "__nop",
-        "reentrant", "interrupt", "using", "xdata", "idata", "pdata", "code"
-    };
+    private static readonly LPC1765_Keil_AppStubPack SupportPack = LPC1765_Keil_AppStubPack.Default;
 
-    private static readonly HashSet<string> KnownTypeNames = new(StringComparer.OrdinalIgnoreCase)
+    public static void WriteSupportFiles(string directory)
     {
-        "void", "char", "short", "int", "long", "float", "double", "signed", "unsigned",
-        "int8_t", "uint8_t", "int16_t", "uint16_t", "int32_t", "uint32_t",
-        "int8", "uint8", "int16", "uint16", "int32", "uint32",
-        "s8", "u8", "s16", "u16", "s32", "u32",
-        "S8", "U8", "S16", "U16", "S32", "U32",
-        "bit",
-        "uchar", "UCHAR", "ushort", "USHORT", "uint", "UINT", "ulong", "ULONG",
-        "BYTE", "WORD", "DWORD", "BOOL", "bool",
-        "INT8U", "INT16U", "INT32U", "INT8S", "INT16S", "INT32S",
-        "size_t"
-    };
-
-    private static readonly HashSet<string> BuiltinFunctionNames = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "printf", "strlen", "strcpy", "strncpy", "memcpy", "memset", "memcmp",
-        "abs", "labs", "llabs", "_BitV"
-    };
+        SupportPack.WriteSupportFiles(directory);
+    }
 
     public static string Generate(
         OfflineWorkerProjectPayload project,
@@ -541,20 +540,35 @@ internal static class SimulationCGenerator
             sanitizedSources.Add((source, sanitized));
         }
 
-        HashSet<string> definedFunctionNames = sanitizedSources
+        List<(OfflineWorkerSourcePayload Source, string Text)> appSources = sanitizedSources
+            .Where(item => SupportPack.IsApplicationSourceFile(project.WorkDirectory, item.Source.FilePath))
+            .ToList();
+        List<string> excludedSourceNames = sanitizedSources
+            .Where(item => !SupportPack.IsApplicationSourceFile(project.WorkDirectory, item.Source.FilePath))
+            .Select(item => item.Source.FunctionName)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(20)
+            .ToList();
+        if (excludedSourceNames.Count > 0)
+        {
+            _lastCoverageNotes.Add("离线未覆盖：底层源码未参与编译，相关调用自动 stub/mock：" + string.Join(", ", excludedSourceNames));
+        }
+
+        HashSet<string> definedFunctionNames = appSources
             .Where(item => SourceDefinesFunction(item.Source, item.Text))
             .Select(item => item.Source.FunctionName)
             .Where(IsValidIdentifier)
-            .Where(name => !BuiltinFunctionNames.Contains(name))
-            .Where(name => !IsStubOnlyFunctionName(name))
+            .Where(name => !SupportPack.IsBuiltinFunctionName(name))
+            .Where(name => !SupportPack.IsStubOnlyFunctionName(name))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        foreach ((OfflineWorkerSourcePayload _, string sanitized) in sanitizedSources)
+        foreach ((OfflineWorkerSourcePayload _, string sanitized) in appSources)
         {
             foreach (Match match in Regex.Matches(sanitized, @"\b(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*\("))
             {
                 string name = match.Groups["name"].Value;
-                if (!CKeywords.Contains(name) && !definedFunctionNames.Contains(name) && !BuiltinFunctionNames.Contains(name))
+                if (!SupportPack.IsCKeyword(name) && !definedFunctionNames.Contains(name) && !SupportPack.IsBuiltinFunctionName(name))
                 {
                     calledFunctions.Add(name);
                 }
@@ -568,9 +582,9 @@ internal static class SimulationCGenerator
             _lastCoverageNotes.Add(note);
         }
 
-        HashSet<string> externalTypeNames = CollectExternalTypeIdentifiers(sanitizedSources.Select(item => item.Text));
+        HashSet<string> externalTypeNames = CollectExternalTypeIdentifiers(appSources.Select(item => item.Text));
         HashSet<string> externalScalars = CollectExternalScalarIdentifiers(
-            sanitizedSources.Select(item => item.Text),
+            appSources.Select(item => item.Text),
             sourceFunctionNames,
             calledFunctions,
             externalTypeNames);
@@ -617,7 +631,7 @@ internal static class SimulationCGenerator
 
             foreach (string alias in variable.Aliases.Where(IsValidIdentifier).Distinct(StringComparer.OrdinalIgnoreCase))
             {
-                if (!CKeywords.Contains(alias) && !aliasToStorage.ContainsKey(alias))
+                if (!SupportPack.IsCKeyword(alias) && !aliasToStorage.ContainsKey(alias))
                 {
                     aliasToStorage.Add(alias, storage);
                 }
@@ -642,7 +656,7 @@ internal static class SimulationCGenerator
             builder.AppendLine();
         }
 
-        foreach (OfflineWorkerSourcePayload source in project.Sources)
+        foreach (OfflineWorkerSourcePayload source in appSources.Select(item => item.Source))
         {
             if (IsValidIdentifier(source.FunctionName) && definedFunctionNames.Contains(source.FunctionName))
             {
@@ -661,7 +675,7 @@ internal static class SimulationCGenerator
         }
         builder.AppendLine();
 
-        foreach ((OfflineWorkerSourcePayload source, string sanitized) in sanitizedSources)
+        foreach ((OfflineWorkerSourcePayload source, string sanitized) in appSources)
         {
             if (!definedFunctionNames.Contains(source.FunctionName))
             {
@@ -682,9 +696,7 @@ internal static class SimulationCGenerator
             }
             builder.Append("long long ");
             builder.Append(stub);
-            builder.Append("() { return ");
-            builder.Append(stub.Equals("CanMonitor_BusinessGate", StringComparison.OrdinalIgnoreCase) ? "1" : "0");
-            builder.AppendLine("; }");
+            builder.AppendLine(SupportPack.BuildStubBody(stub));
         }
 
         builder.AppendLine("int main() {");
@@ -751,14 +763,25 @@ internal static class SimulationCGenerator
         {
             _lastCoverageNotes.Add("离线未覆盖：业务调用被 stub " + string.Join(", ", suspiciousStubs));
         }
+
+        List<string> appStubbed = calledFunctions
+            .Where(SupportPack.IsStubOnlyFunctionName)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+            .Take(24)
+            .ToList();
+        if (appStubbed.Count > 0)
+        {
+            _lastCoverageNotes.Add("离线覆盖：底层/边界函数已自动 stub/mock " + string.Join(", ", appStubbed));
+        }
     }
 
     private static bool IsLikelyBusinessFunctionStub(string name)
     {
         if (!IsValidIdentifier(name) ||
-            CKeywords.Contains(name) ||
-            BuiltinFunctionNames.Contains(name) ||
-            IsStubOnlyFunctionName(name))
+            SupportPack.IsCKeyword(name) ||
+            SupportPack.IsBuiltinFunctionName(name) ||
+            SupportPack.IsStubOnlyFunctionName(name))
         {
             return false;
         }
@@ -931,66 +954,9 @@ internal static class SimulationCGenerator
 
     private static void AppendCompatibilityPreamble(StringBuilder builder)
     {
-        builder.AppendLine("typedef signed char int8_t;");
-        builder.AppendLine("typedef unsigned char uint8_t;");
-        builder.AppendLine("typedef signed short int16_t;");
-        builder.AppendLine("typedef unsigned short uint16_t;");
-        builder.AppendLine("typedef signed int int32_t;");
-        builder.AppendLine("typedef unsigned int uint32_t;");
-        builder.AppendLine("typedef signed char int8;");
-        builder.AppendLine("typedef unsigned char uint8;");
-        builder.AppendLine("typedef signed short int16;");
-        builder.AppendLine("typedef unsigned short uint16;");
-        builder.AppendLine("typedef signed int int32;");
-        builder.AppendLine("typedef unsigned int uint32;");
-        builder.AppendLine("typedef unsigned char uchar;");
-        builder.AppendLine("typedef unsigned char UCHAR;");
-        builder.AppendLine("typedef unsigned short ushort;");
-        builder.AppendLine("typedef unsigned short USHORT;");
-        builder.AppendLine("typedef unsigned int uint;");
-        builder.AppendLine("typedef unsigned int UINT;");
-        builder.AppendLine("typedef unsigned long ulong;");
-        builder.AppendLine("typedef unsigned long ULONG;");
-        builder.AppendLine("typedef unsigned char u8;");
-        builder.AppendLine("typedef unsigned short u16;");
-        builder.AppendLine("typedef unsigned int u32;");
-        builder.AppendLine("typedef signed char s8;");
-        builder.AppendLine("typedef signed short s16;");
-        builder.AppendLine("typedef signed int s32;");
-        builder.AppendLine("typedef unsigned char BYTE;");
-        builder.AppendLine("typedef unsigned short WORD;");
-        builder.AppendLine("typedef unsigned int DWORD;");
-        builder.AppendLine("typedef unsigned char BOOL;");
-        builder.AppendLine("typedef unsigned char INT8U;");
-        builder.AppendLine("typedef unsigned short INT16U;");
-        builder.AppendLine("typedef unsigned int INT32U;");
-        builder.AppendLine("typedef signed char INT8S;");
-        builder.AppendLine("typedef signed short INT16S;");
-        builder.AppendLine("typedef signed int INT32S;");
-        builder.AppendLine("typedef unsigned char bool;");
-        builder.AppendLine("typedef unsigned char bit;");
-        builder.AppendLine("typedef unsigned int size_t;");
-        builder.AppendLine("#define true 1");
-        builder.AppendLine("#define false 0");
-        builder.AppendLine("#define NULL 0");
-        builder.AppendLine("#define __irq");
-        builder.AppendLine("#define __weak");
-        builder.AppendLine("#define __IO");
-        builder.AppendLine("#define __I");
-        builder.AppendLine("#define __O");
-        builder.AppendLine("#define __packed");
-        builder.AppendLine("#define __align(x)");
-        builder.AppendLine("#define __attribute__(x)");
-        builder.AppendLine("#define __asm(x)");
-        builder.AppendLine("#define __nop()");
-        builder.AppendLine("#define reentrant");
-        builder.AppendLine("#define interrupt");
-        builder.AppendLine("#define using(x)");
-        builder.AppendLine("#define xdata");
-        builder.AppendLine("#define idata");
-        builder.AppendLine("#define pdata");
-        builder.AppendLine("#define code");
-        builder.AppendLine("static long long _BitV(long long v, long long b) { return (b >= 0 && b < 63 && ((v & (1LL << b)) == (1LL << b))) ? 1 : 0; }");
+        builder.Append("#include \"");
+        builder.Append(SupportPack.CompatibilityHeaderFileName);
+        builder.AppendLine("\"");
     }
 
     private static string BuildFunctionPrototype(OfflineWorkerSourcePayload source)
@@ -1025,30 +991,6 @@ internal static class SimulationCGenerator
             RegexOptions.Singleline);
     }
 
-    private static bool IsStubOnlyFunctionName(string name)
-    {
-        return name.Equals("sprintf", StringComparison.OrdinalIgnoreCase) ||
-            name.Equals("snprintf", StringComparison.OrdinalIgnoreCase) ||
-            name.Equals("UARTSend", StringComparison.OrdinalIgnoreCase) ||
-            name.Equals("LCD_GO_Page", StringComparison.OrdinalIgnoreCase) ||
-            name.StartsWith("LCD_WR_", StringComparison.OrdinalIgnoreCase) ||
-            name.StartsWith("CanMonitor_", StringComparison.OrdinalIgnoreCase) ||
-            IsHardwareSendFunctionName(name);
-    }
-
-    private static bool IsHardwareSendFunctionName(string name)
-    {
-        if (string.IsNullOrWhiteSpace(name))
-        {
-            return false;
-        }
-
-        return Regex.IsMatch(name, @"^CAN\d*_?Send", RegexOptions.IgnoreCase) ||
-            Regex.IsMatch(name, @"^CAN_Send", RegexOptions.IgnoreCase) ||
-            Regex.IsMatch(name, @"^Remote.*_Send", RegexOptions.IgnoreCase) ||
-            Regex.IsMatch(name, @"_Send(?:_|$)", RegexOptions.IgnoreCase);
-    }
-
     private static string SanitizeFunctionSource(OfflineWorkerSourcePayload source, ISet<string> coverageNotes)
     {
         var builder = new StringBuilder();
@@ -1078,6 +1020,14 @@ internal static class SimulationCGenerator
             line = Regex.Replace(line, @"__asm\s*\([^)]*\)", "");
             line = Regex.Replace(line, @"\b(?:data|near|far|large|small|compact)\b", "");
             line = Regex.Replace(line, @"\bbit\b", "unsigned char");
+            if (TryNormalizeBareMacroStatement(line, source, coverageNotes, out string macroStatement))
+            {
+                line = macroStatement;
+            }
+            if (TryNormalizeFunctionPointerAssignment(line, source, coverageNotes, out string functionPointerAssignment))
+            {
+                line = functionPointerAssignment;
+            }
             line = NormalizePointerSyntax(line, source, coverageNotes);
             if (line.Contains("sbit", StringComparison.Ordinal))
             {
@@ -1107,18 +1057,106 @@ internal static class SimulationCGenerator
         return builder.ToString();
     }
 
+    private static bool TryNormalizeBareMacroStatement(
+        string line,
+        OfflineWorkerSourcePayload source,
+        ISet<string> coverageNotes,
+        out string normalized)
+    {
+        normalized = line;
+        string trimmed = line.Trim();
+        if (!Regex.IsMatch(trimmed, @"^[A-Za-z_][A-Za-z0-9_]*;?$"))
+        {
+            return false;
+        }
+
+        string identifier = trimmed.TrimEnd(';');
+        if (SupportPack.IsCKeyword(identifier) ||
+            SupportPack.IsKnownTypeName(identifier) ||
+            SupportPack.IsBuiltinFunctionName(identifier))
+        {
+            return false;
+        }
+
+        coverageNotes.Add("离线未覆盖：硬件/编译器宏语句已按空操作处理（" + source.FunctionName + "）。");
+        normalized = ";";
+        return true;
+    }
+
+    private static bool TryNormalizeFunctionPointerAssignment(
+        string line,
+        OfflineWorkerSourcePayload source,
+        ISet<string> coverageNotes,
+        out string normalized)
+    {
+        normalized = line;
+        Match match = Regex.Match(
+            line,
+            @"^\s*(?<lhs>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?<rhs>[A-Za-z_][A-Za-z0-9_]*)\s*;\s*$");
+        if (!match.Success)
+        {
+            return false;
+        }
+
+        string lhs = match.Groups["lhs"].Value;
+        string rhs = match.Groups["rhs"].Value;
+        bool looksLikeTaskPointer =
+            lhs.StartsWith("gp_", StringComparison.OrdinalIgnoreCase) ||
+            lhs.Contains("task", StringComparison.OrdinalIgnoreCase) ||
+            lhs.Contains("callback", StringComparison.OrdinalIgnoreCase) ||
+            lhs.Contains("handler", StringComparison.OrdinalIgnoreCase);
+        bool rhsLooksLikeEntry =
+            rhs.Contains("disp", StringComparison.OrdinalIgnoreCase) ||
+            rhs.Contains("display", StringComparison.OrdinalIgnoreCase) ||
+            rhs.Contains("frame", StringComparison.OrdinalIgnoreCase) ||
+            rhs.Contains("task", StringComparison.OrdinalIgnoreCase) ||
+            rhs.Contains("main", StringComparison.OrdinalIgnoreCase);
+        if (!looksLikeTaskPointer && !rhsLooksLikeEntry)
+        {
+            return false;
+        }
+
+        coverageNotes.Add("离线未覆盖：函数指针/任务入口绑定已按调度 no-op 处理（" + source.FunctionName + "）。");
+        normalized = ";";
+        return true;
+    }
+
     private static string NormalizePointerSyntax(string line, OfflineWorkerSourcePayload source, ISet<string> coverageNotes)
     {
         string normalized = Regex.Replace(
             line,
             @"^\s*(?<type>[A-Za-z_][A-Za-z0-9_]*(?:\s+[A-Za-z_][A-Za-z0-9_]*)*)\s*\*\s*(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*NULL\s*;",
             "long long ${name} = 0;");
-        normalized = Regex.Replace(normalized, @"\([A-Za-z_][A-Za-z0-9_]*\s*\*\)", "");
+        normalized = Regex.Replace(normalized, @"\([A-Za-z_][A-Za-z0-9_]*(?:\s+[A-Za-z_][A-Za-z0-9_]*)*\s*\*\)", "");
+        normalized = Regex.Replace(normalized, @"&\s*(?<name>[A-Za-z_][A-Za-z0-9_]*)", "${name}");
+        normalized = NormalizePointerDereferences(normalized);
         if (!normalized.Equals(line, StringComparison.Ordinal))
         {
             coverageNotes.Add("Offline uncovered: pointer access approximated as scalar (" + source.FunctionName + ").");
         }
         return normalized;
+    }
+
+    private static string NormalizePointerDereferences(string line)
+    {
+        return Regex.Replace(
+            line,
+            @"\*\s*(?<name>[A-Za-z_][A-Za-z0-9_]*)",
+            match =>
+            {
+                int previous = match.Index - 1;
+                while (previous >= 0 && char.IsWhiteSpace(line[previous]))
+                {
+                    previous--;
+                }
+
+                if (previous < 0 || "=({[,!~?:;+-".Contains(line[previous], StringComparison.Ordinal))
+                {
+                    return match.Groups["name"].Value;
+                }
+
+                return match.Value;
+            });
     }
 
     private static int FindFunctionStartLine(OfflineWorkerSourcePayload source)
@@ -1205,8 +1243,8 @@ internal static class SimulationCGenerator
         IReadOnlySet<string> externalTypeNames)
     {
         if (!IsValidIdentifier(name) ||
-            CKeywords.Contains(name) ||
-            KnownTypeNames.Contains(name) ||
+            SupportPack.IsCKeyword(name) ||
+            SupportPack.IsKnownTypeName(name) ||
             externalTypeNames.Contains(name) ||
             name.EndsWith("_TypeDef", StringComparison.Ordinal) ||
             sourceFunctionNames.Contains(name) ||
