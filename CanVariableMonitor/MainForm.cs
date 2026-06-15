@@ -742,6 +742,8 @@ public sealed partial class MainForm : Form
 
 	private static readonly Color FixedCodeValueTagForeColor = Color.FromArgb(51, 51, 51);
 
+	private static readonly string KeilCodeFontFamily = ResolveCodeFontFamily("Courier New");
+
 	private static readonly string[] CCodeKeywords =
 	{
 		"auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else", "enum",
@@ -840,6 +842,35 @@ public sealed partial class MainForm : Form
 	private int ScaleProfileLayoutValue(int value, int profileDpi)
 	{
 		return ScaleLayoutValue(value, profileDpi, Math.Max(96, _currentUiDpi));
+	}
+
+	private static string ResolveCodeFontFamily(string preferredFamily)
+	{
+		static bool IsInstalled(string familyName)
+		{
+			return FontFamily.Families.Any(family =>
+				string.Equals(family.Name, familyName, StringComparison.OrdinalIgnoreCase));
+		}
+
+		if (IsInstalled(preferredFamily))
+		{
+			return preferredFamily;
+		}
+
+		foreach (string fallbackFamily in new[] { "NSimSun", "Courier New", "Lucida Console", "Consolas" })
+		{
+			if (IsInstalled(fallbackFamily))
+			{
+				return fallbackFamily;
+			}
+		}
+
+		return FontFamily.GenericMonospace.Name;
+	}
+
+	private static Font CreateCodeFont(float size, FontStyle style = FontStyle.Regular)
+	{
+		return new Font(KeilCodeFontFamily, size, style);
 	}
 
 	private int DetectRuntimeDpi()
@@ -2596,7 +2627,7 @@ public sealed partial class MainForm : Form
 			HideSelection = false,
 			BackColor = _surface,
 			ForeColor = _ink,
-			Font = new Font("Consolas", _functionCodeFontSize),
+			Font = CreateCodeFont(_functionCodeFontSize),
 			ScrollBars = RichTextBoxScrollBars.Both,
 			Visible = false
 		};
@@ -2607,7 +2638,7 @@ public sealed partial class MainForm : Form
 			Visible = false,
 			BackColor = Color.Transparent,
 			ForeColor = _codeValueColor,
-			Font = new Font("Consolas", Math.Max(9f, _functionCodeFontSize - 0.5f)),
+			Font = CreateCodeFont(Math.Max(9f, _functionCodeFontSize - 0.5f)),
 			TabStop = false,
 			Tag = "surface"
 		};
@@ -2640,7 +2671,7 @@ public sealed partial class MainForm : Form
 			WrapMode = ScintillaNET.WrapMode.None,
 			TabWidth = 4,
 			UseTabs = false,
-			Font = new Font("Consolas", _functionCodeFontSize),
+			Font = CreateCodeFont(_functionCodeFontSize),
 			BackColor = _surface,
 			ForeColor = _ink,
 			Tag = "codeEditor"
@@ -2673,10 +2704,10 @@ public sealed partial class MainForm : Form
 
 		editor.BackColor = _surface;
 		editor.ForeColor = _ink;
-		editor.Font = new Font("Consolas", _functionCodeFontSize);
+		editor.Font = CreateCodeFont(_functionCodeFontSize);
 		editor.LexerName = "cpp";
 		editor.StyleResetDefault();
-		editor.Styles[ScintillaNET.Style.Default].Font = "Consolas";
+		editor.Styles[ScintillaNET.Style.Default].Font = KeilCodeFontFamily;
 		editor.Styles[ScintillaNET.Style.Default].SizeF = _functionCodeFontSize;
 		editor.Styles[ScintillaNET.Style.Default].BackColor = _surface;
 		editor.Styles[ScintillaNET.Style.Default].ForeColor = _ink;
@@ -2695,22 +2726,22 @@ public sealed partial class MainForm : Form
 		editor.Styles[ScintillaNET.Style.Cpp.StringEol].ForeColor = _codeValueColor;
 		editor.Styles[ScintillaNET.Style.Cpp.Word2].ForeColor = _codeFunctionColor;
 		float inlineValueFontSize = Math.Max(9f, _functionCodeFontSize + 1f);
-		editor.Styles[ScintillaStyleValueFresh].Font = "Consolas";
+		editor.Styles[ScintillaStyleValueFresh].Font = KeilCodeFontFamily;
 		editor.Styles[ScintillaStyleValueFresh].SizeF = inlineValueFontSize;
 		editor.Styles[ScintillaStyleValueFresh].BackColor = _codeValueTagActiveBackColor;
 		editor.Styles[ScintillaStyleValueFresh].ForeColor = _codeValueTagActiveForeColor;
 		editor.Styles[ScintillaStyleValueFresh].Bold = false;
-		editor.Styles[ScintillaStyleValueStale].Font = "Consolas";
+		editor.Styles[ScintillaStyleValueStale].Font = KeilCodeFontFamily;
 		editor.Styles[ScintillaStyleValueStale].SizeF = inlineValueFontSize;
 		editor.Styles[ScintillaStyleValueStale].BackColor = _codeValueTagInactiveBackColor;
 		editor.Styles[ScintillaStyleValueStale].ForeColor = _codeValueTagInactiveForeColor;
 		editor.Styles[ScintillaStyleValueStale].Bold = false;
-		editor.Styles[ScintillaStyleFunctionName].Font = "Consolas";
+		editor.Styles[ScintillaStyleFunctionName].Font = KeilCodeFontFamily;
 		editor.Styles[ScintillaStyleFunctionName].SizeF = _functionCodeFontSize;
 		editor.Styles[ScintillaStyleFunctionName].BackColor = _surface;
 		editor.Styles[ScintillaStyleFunctionName].ForeColor = _codeFunctionColor;
 		editor.Styles[ScintillaStyleFunctionName].Bold = false;
-		editor.Styles[ScintillaStyleParameterName].Font = "Consolas";
+		editor.Styles[ScintillaStyleParameterName].Font = KeilCodeFontFamily;
 		editor.Styles[ScintillaStyleParameterName].SizeF = _functionCodeFontSize;
 		editor.Styles[ScintillaStyleParameterName].BackColor = _surface;
 		editor.Styles[ScintillaStyleParameterName].ForeColor = _accent;
@@ -3084,7 +3115,7 @@ public sealed partial class MainForm : Form
 			HideSelection = false,
 			BackColor = _surface,
 			ForeColor = _ink,
-			Font = new Font("Consolas", _functionCodeFontSize),
+			Font = CreateCodeFont(_functionCodeFontSize),
 			ScrollBars = RichTextBoxScrollBars.Both
 		};
 		if (_functionCodeBox is FastCodeRichTextBox fastCodeBox)
@@ -12877,10 +12908,10 @@ public sealed partial class MainForm : Form
 		try
 		{
 			_functionCodeFontSize = nextSize;
-			_functionCodeBox.Font = new Font("Consolas", _functionCodeFontSize);
+			_functionCodeBox.Font = CreateCodeFont(_functionCodeFontSize);
 			if (_dataCodeBox != null)
 			{
-				_dataCodeBox.Font = new Font("Consolas", _functionCodeFontSize);
+				_dataCodeBox.Font = CreateCodeFont(_functionCodeFontSize);
 			}
 			_lastFunctionCodeText = "";
 			_lastDataCodeText = "";
@@ -14142,7 +14173,7 @@ public sealed partial class MainForm : Form
 		_codeValueOverlayEmptyRefreshCount = 0;
 		_lastCodeValueOverlayRowsUtc = DateTime.UtcNow;
 		Color valueFore = PickCodeValueOverlayForeColor();
-		_codeValueOverlay.Font = new Font("Consolas", Math.Max(8.5f, _functionCodeFontSize - 0.35f), FontStyle.Regular);
+		_codeValueOverlay.Font = CreateCodeFont(Math.Max(8.5f, _functionCodeFontSize - 0.35f));
 		_codeValueOverlay.Visible = false;
 		_codeValueOverlayWindow ??= new CodeValueOverlayWindow();
 		_codeValueOverlayWindow.Font = _codeValueOverlay.Font;
@@ -18236,7 +18267,9 @@ public sealed partial class MainForm : Form
 	{
 		var builder = new StringBuilder();
 		builder.Append(@"{\rtf1\ansi\deff0");
-		builder.Append(@"{\fonttbl{\f0 Consolas;}}");
+		builder.Append(@"{\fonttbl{\f0 ");
+		AppendRtfFontName(builder, KeilCodeFontFamily);
+		builder.Append(";}}");
 		builder.Append(@"{\colortbl ;");
 		AppendRtfColor(builder, _muted);
 		AppendRtfColor(builder, _ink);
@@ -18285,6 +18318,35 @@ public sealed partial class MainForm : Form
 			.Append(@"\green").Append(color.G)
 			.Append(@"\blue").Append(color.B)
 			.Append(';');
+	}
+
+	private static void AppendRtfFontName(StringBuilder builder, string fontName)
+	{
+		foreach (char c in fontName)
+		{
+			switch (c)
+			{
+				case '\\':
+					builder.Append(@"\\");
+					break;
+				case '{':
+					builder.Append(@"\{");
+					break;
+				case '}':
+					builder.Append(@"\}");
+					break;
+				default:
+					if (c <= 0x7f)
+					{
+						builder.Append(c);
+					}
+					else
+					{
+						builder.Append(@"\u").Append(unchecked((short)c)).Append('?');
+					}
+					break;
+			}
+		}
 	}
 
 	private static void AppendRtfText(StringBuilder builder, string text, int colorIndex)
@@ -21830,11 +21892,11 @@ public sealed partial class MainForm : Form
 			_programTreeFontSize = Math.Clamp(monitorProfile.ProgramTreeFontSize <= 0 ? 15f : monitorProfile.ProgramTreeFontSize, 10f, 22f);
 			if (_functionCodeBox != null)
 			{
-				_functionCodeBox.Font = new Font("Consolas", _functionCodeFontSize);
+				_functionCodeBox.Font = CreateCodeFont(_functionCodeFontSize);
 			}
 			if (_dataCodeBox != null)
 			{
-				_dataCodeBox.Font = new Font("Consolas", _functionCodeFontSize);
+				_dataCodeBox.Font = CreateCodeFont(_functionCodeFontSize);
 			}
 			if (_flowChart != null)
 			{
