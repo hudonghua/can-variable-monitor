@@ -20,7 +20,7 @@ namespace CanVariableMonitor;
 
 public sealed partial class MainForm : Form
 {
-	private const string UpperComputerVersion = "V1.3";
+	private const string UpperComputerVersion = "V1.4";
 
 	private const string AppDisplayName = "上位机监控";
 

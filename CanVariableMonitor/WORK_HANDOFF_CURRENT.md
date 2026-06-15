@@ -4,7 +4,7 @@
 
 - GitHub 仓库：`https://github.com/hudonghua/can-variable-monitor.git`
 - 关键词：`上位机监控`
-- 当前源码版本号：`V1.3`
+- 当前源码版本号：`V1.4`
 - 自动更新地址：`http://8.148.250.52:9999/update_manifest.json`
 - F 盘本机测试目录：`F:\工作\AI模型\s上位机\监控上位机\上位机\上位机监控_V1.2_20260612_120554`
 
