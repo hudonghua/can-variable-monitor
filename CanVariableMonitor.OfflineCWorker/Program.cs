@@ -645,6 +645,13 @@ internal static class SimulationCGenerator
         }
         builder.AppendLine();
 
+        bool hasSchedulerFlags = AppendSchedulerFlagMockFunction(builder, project);
+        if (hasSchedulerFlags)
+        {
+            _lastCoverageNotes.Add("离线覆盖：定时标志变量已按 tick 触发态 mock。");
+            builder.AppendLine();
+        }
+
         bool hasActiveForces = forceValues.Count > 0;
         HashSet<string> forcedAliases = hasActiveForces
             ? BuildForcedAliases(project, forceValues)
@@ -710,6 +717,14 @@ internal static class SimulationCGenerator
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
 
         builder.AppendLine("int main() {");
+        if (hasSchedulerFlags)
+        {
+            builder.AppendLine("  __canmon_mock_scheduler_flags();");
+        }
+        if (hasActiveForces)
+        {
+            builder.AppendLine("  __canmon_apply_forces();");
+        }
         foreach (string root in project.RootFunctions.Where(name => definedFunctionNames.Contains(name)).Distinct(StringComparer.OrdinalIgnoreCase))
         {
             if (!sourceByFunctionName.TryGetValue(root, out OfflineWorkerSourcePayload? rootSource) ||
@@ -743,6 +758,52 @@ internal static class SimulationCGenerator
         builder.AppendLine("  return 0;");
         builder.AppendLine("}");
         return builder.ToString();
+    }
+
+    private static bool AppendSchedulerFlagMockFunction(StringBuilder builder, OfflineWorkerProjectPayload project)
+    {
+        List<int> schedulerFlags = project.Variables
+            .Select((variable, index) => new { Variable = variable, Index = index })
+            .Where(item => IsSchedulerFlagVariable(item.Variable))
+            .Select(item => item.Index)
+            .Distinct()
+            .ToList();
+        if (schedulerFlags.Count == 0)
+        {
+            return false;
+        }
+
+        builder.AppendLine("static void __canmon_mock_scheduler_flags(void) {");
+        foreach (int index in schedulerFlags)
+        {
+            builder.Append("  __cm_v");
+            builder.Append(index.ToString(CultureInfo.InvariantCulture));
+            builder.AppendLine(" = 1;");
+        }
+        builder.AppendLine("}");
+        return true;
+    }
+
+    private static bool IsSchedulerFlagVariable(OfflineWorkerVariablePayload variable)
+    {
+        IEnumerable<string> aliases = variable.Aliases ?? Enumerable.Empty<string>();
+        foreach (string alias in aliases
+            .Append(variable.Name)
+            .Append(variable.Key)
+            .Where(text => !string.IsNullOrWhiteSpace(text)))
+        {
+            string normalized = Regex.Replace(alias, @"[^A-Za-z0-9]", "").ToLowerInvariant();
+            if (normalized.Contains("timeflg", StringComparison.Ordinal) ||
+                normalized.Contains("timeflag", StringComparison.Ordinal) ||
+                normalized.Contains("t0flg", StringComparison.Ordinal) ||
+                normalized.Contains("t010msflg", StringComparison.Ordinal) ||
+                (normalized.Contains("flg", StringComparison.Ordinal) && normalized.Contains("ms", StringComparison.Ordinal)))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static void AddGenerationCoverage(

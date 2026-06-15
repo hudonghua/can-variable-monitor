@@ -154,6 +154,45 @@ function Get-CalledFunctions {
     return $result
 }
 
+function Find-MainLoopTickFunction {
+    if (-not $functionDefs.ContainsKey("main")) {
+        return $null
+    }
+
+    $main = $functionDefs["main"]
+    $text = ([string]$main.text).Replace("`r`n", "`n").Replace("`r", "`n")
+    $code = Remove-CodeCommentsPreserveLength $text
+    $loop = [regex]::Match(
+        $code,
+        '\b(?:(?:while\s*\(\s*(?:1|true)\s*\))|(?:for\s*\(\s*;\s*;\s*\)))\s*\{',
+        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if (-not $loop.Success) {
+        return $null
+    }
+
+    $openBrace = $code.IndexOf('{', $loop.Index)
+    $closeBrace = Find-MatchingBrace $code $openBrace
+    if ($openBrace -lt 0 -or $closeBrace -lt 0 -or $closeBrace -le $openBrace) {
+        return $null
+    }
+
+    $body = $text.Substring($openBrace + 1, $closeBrace - $openBrace - 1).Trim("`r", "`n")
+    $lines = @("void __canmon_main_loop_tick(void)", "{")
+    if (-not [string]::IsNullOrWhiteSpace($body)) {
+        $lines += @($body -split "`n")
+    }
+    $lines += "}"
+
+    return [ordered]@{
+        functionName = "__canmon_main_loop_tick"
+        filePath = $main.filePath
+        startLine = [int]$main.startLine + (Get-LineNumber $text $loop.Index) - 1
+        lines = $lines
+        text = [string]::Join("`n", $lines)
+        canCallWithoutArgs = $true
+    }
+}
+
 function Get-RootScore {
     param([object]$FunctionDef)
     $name = [string]$FunctionDef.functionName
@@ -289,6 +328,39 @@ function New-SmokeVariable {
     }
 }
 
+function Test-SchedulerFlagName {
+    param([string]$Name)
+    if (-not (Test-Identifier $Name)) {
+        return $false
+    }
+
+    $normalized = $Name.ToLowerInvariant()
+    return $normalized.Contains("timeflg") -or
+        $normalized.Contains("timeflag") -or
+        $normalized.Contains("t0flg") -or
+        $normalized.Contains("t010msflg") -or
+        ($normalized.Contains("flg") -and $normalized.Contains("ms"))
+}
+
+function Find-SchedulerVariables {
+    param([object[]]$Sources)
+    $result = [System.Collections.Generic.List[string]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($source in $Sources) {
+        $text = [string]::Join("`n", @($source.lines))
+        $code = Remove-CodeCommentsPreserveLength $text
+        foreach ($match in [regex]::Matches($code, '\b[A-Za-z_][A-Za-z0-9_]*\b')) {
+            $name = $match.Value
+            if ((Test-SchedulerFlagName $name) -and
+                -not $functionDefs.ContainsKey($name) -and
+                $seen.Add($name)) {
+                $result.Add($name)
+            }
+        }
+    }
+    return $result
+}
+
 function New-WorkerWritePayload {
     param([string]$Name, [uint32]$Value)
     return [ordered]@{
@@ -342,12 +414,19 @@ if ($functionDefs.Count -eq 0) {
     throw "No application-layer C functions were discovered after excluding BSP/Driver/CMSIS/Startup sources."
 }
 
-$roots = @($functionDefs.Values |
-    ForEach-Object { [pscustomobject]@{ Def = $_; Score = Get-RootScore $_ } } |
-    Where-Object { $_.Score -ge 20 -and [bool]$_.Def.canCallWithoutArgs } |
-    Sort-Object -Property @{ Expression = "Score"; Descending = $true }, @{ Expression = { $_.Def.functionName }; Descending = $false } |
-    Select-Object -First 3 |
-    ForEach-Object { $_.Def.functionName })
+$mainLoopTick = Find-MainLoopTickFunction
+if ($null -ne $mainLoopTick) {
+    $functionDefs[$mainLoopTick.functionName] = $mainLoopTick
+    $roots = @("__canmon_main_loop_tick")
+}
+else {
+    $roots = @($functionDefs.Values |
+        ForEach-Object { [pscustomobject]@{ Def = $_; Score = Get-RootScore $_ } } |
+        Where-Object { $_.Score -ge 20 -and [bool]$_.Def.canCallWithoutArgs } |
+        Sort-Object -Property @{ Expression = "Score"; Descending = $true }, @{ Expression = { $_.Def.functionName }; Descending = $false } |
+        Select-Object -First 3 |
+        ForEach-Object { $_.Def.functionName })
+}
 
 if ($roots.Count -eq 0) {
     $roots = @($functionDefs.Values | Where-Object { [bool]$_.canCallWithoutArgs } | Sort-Object functionName | Select-Object -First 1 | ForEach-Object { $_.functionName })
@@ -363,15 +442,24 @@ if ($branchCandidates.Count -eq 0) {
     throw "No forceable branch candidate was discovered in reachable application sources."
 }
 
+$schedulerVariables = @(Find-SchedulerVariables $sources)
 $branchPassed = $false
 $branchSummary = ""
 $lastBranchError = ""
 foreach ($branch in $branchCandidates) {
-    $variables = @(
-        (New-SmokeVariable "__offline_smoke_value" 1),
-        (New-SmokeVariable $branch.condition 2),
-        (New-SmokeVariable $branch.target 3)
-    )
+    $variables = [System.Collections.Generic.List[object]]::new()
+    $variables.Add((New-SmokeVariable "__offline_smoke_value" 1))
+    $variables.Add((New-SmokeVariable $branch.condition 2))
+    $variables.Add((New-SmokeVariable $branch.target 3))
+    $nextAddress = [uint32]16
+    foreach ($flag in $schedulerVariables) {
+        if ($flag.Equals($branch.condition, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $flag.Equals($branch.target, [System.StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+        $variables.Add((New-SmokeVariable $flag $nextAddress))
+        $nextAddress++
+    }
     $project = [ordered]@{
         workDirectory = $ProjectSrc
         signature = "real-project-auto-app-smoke"
@@ -445,5 +533,5 @@ if (-not $branchPassed) {
 
 Write-Host "Real project offline smoke passed."
 Write-Host "Roots: $($roots -join ', ')"
-Write-Host "Application sources: $($sources.Count); smoke variables: 3"
+Write-Host "Application sources: $($sources.Count); scheduler flags: $($schedulerVariables.Count)"
 Write-Host "Force branch check passed: $branchSummary"

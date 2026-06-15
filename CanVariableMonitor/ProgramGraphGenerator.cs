@@ -119,6 +119,8 @@ internal static partial class ProgramGraphGenerator
         Dictionary<string, int> outgoing = businessEdges.GroupBy(e => e.FromId).ToDictionary(g => g.Key, g => g.Count());
         FunctionNode start = PickFlowStart(businessFunctions);
         FunctionNode? primaryEntry = FindPrimaryBusinessEntry(raw.Functions, start);
+        FunctionNode? mainEntry = raw.Functions.FirstOrDefault(f => f.Name.Equals("main", StringComparison.OrdinalIgnoreCase));
+        bool mainHasOutgoing = mainEntry != null && raw.Edges.Any(e => e.FromId.Equals(mainEntry.Id, StringComparison.OrdinalIgnoreCase));
         IReadOnlyList<ProgramFrameworkStep> frameworkSteps = BuildFrameworkSteps(raw.Functions);
         IReadOnlyList<ProgramFunctionInfo> flow = BuildFlowList(businessFunctions, businessEdges, start.Id, 18);
         (IReadOnlyList<ProgramCallGraphNode> callGraphNodes, IReadOnlyList<ProgramCallGraphEdge> callGraphEdges) callGraph =
@@ -150,7 +152,7 @@ internal static partial class ProgramGraphGenerator
             SourceFileCount = raw.SourceFileCount,
             FunctionCount = raw.Functions.Count,
             EdgeCount = raw.Edges.Count,
-            StartFunction = primaryEntry?.Name ?? start.Name,
+            StartFunction = mainHasOutgoing ? mainEntry!.Name : primaryEntry?.Name ?? start.Name,
             FrameworkSteps = frameworkSteps,
             FlowFunctions = flow,
             HotFunctions = hot,
@@ -1134,6 +1136,7 @@ internal static partial class ProgramGraphGenerator
             .Where(f => IsBusinessGraphVisibleFunction(f, hints, incoming, outgoingCount))
             .Select(f => f.Id)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        FunctionNode? mainEntry = functions.FirstOrDefault(f => f.Name.Equals("main", StringComparison.OrdinalIgnoreCase));
         FunctionNode? logic10msEntry = FindPrimaryBusinessEntry(functions, preferredStart);
         if (logic10msEntry != null)
         {
@@ -1141,6 +1144,10 @@ internal static partial class ProgramGraphGenerator
             entryScopeIds.Add(logic10msEntry.Id);
             visibleBusinessIds.RemoveWhere(id => !entryScopeIds.Contains(id));
             visibleBusinessIds.Add(logic10msEntry.Id);
+            if (mainEntry != null)
+            {
+                visibleBusinessIds.Add(mainEntry.Id);
+            }
             foreach (FunctionNode function in functions.Where(f => entryScopeIds.Contains(f.Id) && IsReachableBusinessChainFunction(f)))
             {
                 visibleBusinessIds.Add(function.Id);
@@ -1195,7 +1202,8 @@ internal static partial class ProgramGraphGenerator
             {
                 bool isLogic10Entry = function.Id.Equals(logic10msEntry.Id, StringComparison.OrdinalIgnoreCase);
                 bool isOtherPeriodicEntry = IsPeriodicEntryCandidate(function) && !isLogic10Entry;
-                if (!isLogic10Entry && !isOtherPeriodicEntry && normalizedLevel <= 0)
+                bool isMainEntry = function.Name.Equals("main", StringComparison.OrdinalIgnoreCase);
+                if (!isLogic10Entry && !isOtherPeriodicEntry && !isMainEntry && normalizedLevel <= 0)
                 {
                     normalizedLevel = 1;
                 }
@@ -1213,12 +1221,13 @@ internal static partial class ProgramGraphGenerator
             }
         }
 
-        AddSeed(logic10msEntry, 0);
+        AddSeed(mainEntry, 0);
+        AddSeed(logic10msEntry, mainEntry == null ? 0 : 1);
         if (logic10msEntry == null)
         {
             foreach (FunctionNode periodicEntry in FindPeriodicEntryCandidates(functions).Take(3))
             {
-                AddSeed(periodicEntry, 0);
+                AddSeed(periodicEntry, mainEntry == null ? 0 : 1);
             }
         }
         foreach (FunctionNode child in directLogicChildren)

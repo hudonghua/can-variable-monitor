@@ -3305,6 +3305,7 @@ public sealed partial class MainForm : Form
 		{
 			ClearOfflineSimulationProgramCache();
 			ClearFunctionIndex();
+			_offlineRootSelectionText = "";
 			_mapFilePath = "";
 			_mapLastWrite = default(DateTime);
 			_symbols.Clear();
@@ -3320,6 +3321,7 @@ public sealed partial class MainForm : Form
 			_businessDictionary = ProjectBusinessDictionary.Empty;
 			_businessDictionaryDirectory = "";
 			_lastProgramInsightSignature = "";
+			ApplyOfflineRootSelectionToUi();
 			UpdateProgramInsightPanel(force: true);
 		}
 		_workDirectory = directory;
@@ -5642,7 +5644,7 @@ public sealed partial class MainForm : Form
 
 		List<FunctionSourceView> roots = BuildOfflineApplicationRootSources(directory);
 		List<FunctionSourceView> sourceSeeds = BuildOfflineApplicationSources(directory);
-		List<FunctionSourceView> sources = ExpandOfflineReachableSources(directory, sourceSeeds, 800);
+		List<FunctionSourceView> sources = ExpandOfflineReachableSources(directory, roots.Concat(sourceSeeds).ToList(), 800);
 		List<WatchItem> bindings = BuildOfflineGlobalBindings(sources);
 		Dictionary<string, WatchItem> aliases = BuildWatchAliasMap(bindings);
 		Dictionary<string, IReadOnlyList<OfflineWriteTrace>> traces = BuildOfflineWriteTraceIndex(sources, aliases);
@@ -5887,7 +5889,116 @@ public sealed partial class MainForm : Form
 
 	private List<FunctionSourceView> BuildOfflineApplicationRootSources(string directory)
 	{
-		return BuildOfflineApplicationSources(directory, includeAnalysisSeeds: false);
+		List<string> configuredRoots = GetConfiguredOfflineRootNames().ToList();
+		var roots = new List<FunctionSourceView>();
+		var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+		void AddRoot(FunctionSourceView source)
+		{
+			if (string.IsNullOrWhiteSpace(source.FunctionName) || !seen.Add(source.FunctionName))
+			{
+				return;
+			}
+			roots.Add(source);
+		}
+
+		FunctionSourceView? mainLoopTick = null;
+		bool useAutomaticMainLoop = configuredRoots.Count == 0 &&
+			TryBuildOfflineMainLoopTickSource(directory, out mainLoopTick) &&
+			mainLoopTick != null;
+		if (useAutomaticMainLoop && mainLoopTick != null)
+		{
+			AddRoot(mainLoopTick);
+		}
+
+		foreach (OfflineRootCandidate candidate in BuildOfflineRootCandidates(directory, includeAnalysisSeeds: false))
+		{
+			if (roots.Count >= 12)
+			{
+				break;
+			}
+			if (useAutomaticMainLoop &&
+				!candidate.Reason.Contains("任务函数指针", StringComparison.OrdinalIgnoreCase) &&
+				!candidate.Reason.Contains("显示", StringComparison.OrdinalIgnoreCase))
+			{
+				continue;
+			}
+			if (candidate.FunctionName.Equals("main", StringComparison.OrdinalIgnoreCase))
+			{
+				continue;
+			}
+			if (TryLoadFunctionSource(directory, candidate.FunctionName, out FunctionSourceView? source) && source != null)
+			{
+				AddRoot(source);
+			}
+		}
+
+		if (roots.Count == 0)
+		{
+			return BuildOfflineApplicationSources(directory, includeAnalysisSeeds: false);
+		}
+
+		return roots;
+	}
+
+	private bool TryBuildOfflineMainLoopTickSource(string directory, out FunctionSourceView? source)
+	{
+		source = null;
+		if (!TryLoadFunctionSource(directory, "main", out FunctionSourceView? mainSource) || mainSource == null)
+		{
+			return false;
+		}
+
+		string text = string.Join("\n", mainSource.Lines);
+		string masked = MaskCommentsAndLiteralsPreserveLength(text);
+		Match loopMatch = Regex.Match(
+			masked,
+			@"\b(?:while\s*\(\s*(?:1|true)\s*\)|for\s*\(\s*;\s*;\s*\))",
+			RegexOptions.IgnoreCase);
+		if (!loopMatch.Success)
+		{
+			return false;
+		}
+
+		int openBrace = masked.IndexOf('{', loopMatch.Index + loopMatch.Length);
+		if (openBrace < 0)
+		{
+			return false;
+		}
+		int closeBrace = FindMatchingBrace(masked, openBrace);
+		if (closeBrace <= openBrace)
+		{
+			return false;
+		}
+
+		string body = text.Substring(openBrace + 1, closeBrace - openBrace - 1)
+			.Replace("\r\n", "\n", StringComparison.Ordinal)
+			.Replace('\r', '\n');
+		var lines = new List<string>
+		{
+			"void __canmon_main_loop_tick(void)",
+			"{"
+		};
+		lines.AddRange(body.Split('\n'));
+		lines.Add("}");
+
+		int bodyStartLine = mainSource.StartLine + CountNewLines(text, openBrace);
+		source = new FunctionSourceView("__canmon_main_loop_tick", mainSource.FilePath, bodyStartLine, lines, 0, body.Length);
+		return true;
+	}
+
+	private static int CountNewLines(string text, int endExclusive)
+	{
+		int count = 0;
+		int end = Math.Min(Math.Max(0, endExclusive), text.Length);
+		for (int i = 0; i < end; i++)
+		{
+			if (text[i] == '\n')
+			{
+				count++;
+			}
+		}
+		return count;
 	}
 
 	private List<FunctionSourceView> BuildOfflineApplicationSources(string directory)
@@ -6022,19 +6133,16 @@ public sealed partial class MainForm : Form
 			}
 		}
 
-		if (candidates.Count == 0)
+		EnsureFunctionIndex(directory);
+		foreach (FunctionIndexEntry entry in _functionIndex.Values
+			.Select(entry => new { Entry = entry, Score = ScoreOfflineRootName(entry.Name, entry.FilePath) })
+			.Where(item => item.Score >= 30)
+			.OrderByDescending(item => item.Score)
+			.ThenBy(item => item.Entry.Name, StringComparer.OrdinalIgnoreCase)
+			.Take(32)
+			.Select(item => item.Entry))
 		{
-			EnsureFunctionIndex(directory);
-			foreach (FunctionIndexEntry entry in _functionIndex.Values
-				.Select(entry => new { Entry = entry, Score = ScoreOfflineRootName(entry.Name, entry.FilePath) })
-				.Where(item => item.Score >= 30)
-				.OrderByDescending(item => item.Score)
-				.ThenBy(item => item.Entry.Name, StringComparer.OrdinalIgnoreCase)
-				.Take(24)
-				.Select(item => item.Entry))
-			{
-				AddCandidate(entry.Name, "源码函数名候选", 30);
-			}
+			AddCandidate(entry.Name, "源码函数名候选", ScoreOfflineRootName(entry.Name, entry.FilePath));
 		}
 
 		List<OfflineRootCandidate> result = candidates.Values
@@ -15724,6 +15832,14 @@ public sealed partial class MainForm : Form
 
 	private static ProgramCallGraphNode? FindControlBusinessRoot(IReadOnlyList<ProgramCallGraphNode> graphNodes)
 	{
+		ProgramCallGraphNode? main = graphNodes
+			.Where(n => !IsProgramGraphNoiseNode(n))
+			.FirstOrDefault(n => n.Name.Equals("main", StringComparison.OrdinalIgnoreCase) && n.Outgoing > 0);
+		if (main != null)
+		{
+			return main;
+		}
+
 		return graphNodes
 			.Where(n => !IsProgramGraphNoiseNode(n))
 			.Where(n => !n.Kind.Equals("driver", StringComparison.OrdinalIgnoreCase) && !n.Kind.Equals("storage", StringComparison.OrdinalIgnoreCase))
@@ -19890,9 +20006,10 @@ public sealed partial class MainForm : Form
 		}
 		_lastTraceId = ushort.MaxValue;
 		string entryName = string.IsNullOrWhiteSpace(programGraphSnapshot.StartFunction) ? "自动识别" : programGraphSnapshot.StartFunction;
+		string entryCaption = entryName.Equals("main", StringComparison.OrdinalIgnoreCase) ? "程序入口" : "业务入口";
 		_runtimeLocationLabel.Text = GetProgramEntryDisplayName(programGraphSnapshot, entryName);
 		_programSummaryLabel.Text = programGraphSnapshot.CallGraphNodes.Count > 0
-			? $"业务入口 {entryName}    {programGraphSnapshot.CallGraphNodes.Count} 个链路函数"
+			? $"{entryCaption} {entryName}    {programGraphSnapshot.CallGraphNodes.Count} 个链路函数"
 			: $"入口 {entryName}    {programGraphSnapshot.FrameworkSteps.Count} 个节点";
 		IReadOnlyList<ProgramFrameworkStep> frameworkSteps = programGraphSnapshot.FrameworkSteps;
 		if (frameworkSteps.Count == 0)
@@ -20380,6 +20497,13 @@ public sealed partial class MainForm : Form
 
 	private static ProgramCallGraphNode? FindPrimaryChartRoot(IReadOnlyList<ProgramCallGraphNode> graphNodes)
 	{
+		ProgramCallGraphNode? main = graphNodes
+			.FirstOrDefault(n => n.Name.Equals("main", StringComparison.OrdinalIgnoreCase) && n.Outgoing > 0);
+		if (main != null)
+		{
+			return main;
+		}
+
 		return graphNodes
 			.Where(IsPreferredGraphRoot)
 			.OrderByDescending(n => ScoreOfflineRootCandidate(n, includeAnalysisSeeds: false))
