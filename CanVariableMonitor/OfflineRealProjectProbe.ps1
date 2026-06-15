@@ -101,11 +101,20 @@ function Find-MatchingBrace {
     return -1
 }
 
+function Test-ZeroParameterList {
+    param([string]$Parameters)
+    if ($null -eq $Parameters) {
+        $Parameters = ""
+    }
+    $text = [regex]::Replace($Parameters, '\s+', '')
+    return $text.Length -eq 0 -or $text.Equals("void", [System.StringComparison]::OrdinalIgnoreCase)
+}
+
 $functionDefs = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::OrdinalIgnoreCase)
 foreach ($file in Get-ChildItem -LiteralPath $ProjectSrc -Recurse -File -Include *.c,*.h | Where-Object { Test-AppSourceFile $_.FullName }) {
     $text = [System.IO.File]::ReadAllText($file.FullName, [System.Text.Encoding]::Default).Replace("`r`n", "`n").Replace("`r", "`n")
     $code = Remove-CodeCommentsPreserveLength $text
-    foreach ($match in [regex]::Matches($code, '\b(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*\{')) {
+    foreach ($match in [regex]::Matches($code, '\b(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*\((?<params>[^;{}]*)\)\s*\{')) {
         $name = $match.Groups["name"].Value
         if ($cKeywords.Contains($name) -or $functionDefs.ContainsKey($name)) {
             continue
@@ -124,6 +133,7 @@ foreach ($file in Get-ChildItem -LiteralPath $ProjectSrc -Recurse -File -Include
             startLine = Get-LineNumber $text $lineStart
             lines = @($sourceText -split "`n")
             text = $sourceText
+            canCallWithoutArgs = Test-ZeroParameterList $match.Groups["params"].Value
         }
     }
 }
@@ -234,13 +244,13 @@ if ($functionDefs.Count -eq 0) {
 
 $roots = @($functionDefs.Values |
     ForEach-Object { [pscustomobject]@{ Def = $_; Score = Get-RootScore $_ } } |
-    Where-Object { $_.Score -ge 20 } |
+    Where-Object { $_.Score -ge 20 -and [bool]$_.Def.canCallWithoutArgs } |
     Sort-Object -Property @{ Expression = "Score"; Descending = $true }, @{ Expression = { $_.Def.functionName }; Descending = $false } |
     Select-Object -First 3 |
     ForEach-Object { $_.Def.functionName })
 
 if ($roots.Count -eq 0) {
-    $roots = @($functionDefs.Values | Sort-Object functionName | Select-Object -First 1 | ForEach-Object { $_.functionName })
+    $roots = @($functionDefs.Values | Where-Object { [bool]$_.canCallWithoutArgs } | Sort-Object functionName | Select-Object -First 1 | ForEach-Object { $_.functionName })
 }
 
 $sources = Build-ReachableSources $roots 500

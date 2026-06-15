@@ -612,7 +612,6 @@ internal static class SimulationCGenerator
         }
 
         builder.AppendLine("extern int printf(const char*, ...);");
-        builder.AppendLine("extern int abs(int);");
         builder.AppendLine();
 
         Dictionary<string, string> aliasToStorage = new(StringComparer.OrdinalIgnoreCase);
@@ -656,6 +655,11 @@ internal static class SimulationCGenerator
             builder.AppendLine();
         }
 
+        List<string> orderedStubs = calledFunctions
+            .Where(IsValidIdentifier)
+            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
         foreach (OfflineWorkerSourcePayload source in appSources.Select(item => item.Source))
         {
             if (IsValidIdentifier(source.FunctionName) && definedFunctionNames.Contains(source.FunctionName))
@@ -663,15 +667,19 @@ internal static class SimulationCGenerator
                 builder.AppendLine(BuildFunctionPrototype(source));
             }
         }
-        foreach (string stub in calledFunctions.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+        foreach (string stub in orderedStubs)
         {
-            if (!IsValidIdentifier(stub))
-            {
-                continue;
-            }
-            builder.Append("long long ");
-            builder.Append(stub);
+            builder.Append("static long long ");
+            builder.Append(BuildStubImplementationName(stub));
             builder.AppendLine("();");
+        }
+        foreach (string stub in orderedStubs)
+        {
+            builder.Append("#define ");
+            builder.Append(stub);
+            builder.Append("(...) ");
+            builder.Append(BuildStubImplementationName(stub));
+            builder.AppendLine("()");
         }
         builder.AppendLine();
 
@@ -688,20 +696,28 @@ internal static class SimulationCGenerator
             builder.AppendLine();
         }
 
-        foreach (string stub in calledFunctions.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+        foreach (string stub in orderedStubs)
         {
-            if (!IsValidIdentifier(stub))
-            {
-                continue;
-            }
-            builder.Append("long long ");
-            builder.Append(stub);
+            builder.Append("static long long ");
+            builder.Append(BuildStubImplementationName(stub));
             builder.AppendLine(SupportPack.BuildStubBody(stub));
         }
+
+        Dictionary<string, OfflineWorkerSourcePayload> sourceByFunctionName = appSources
+            .Select(item => item.Source)
+            .Where(source => definedFunctionNames.Contains(source.FunctionName))
+            .GroupBy(source => source.FunctionName, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
 
         builder.AppendLine("int main() {");
         foreach (string root in project.RootFunctions.Where(name => definedFunctionNames.Contains(name)).Distinct(StringComparer.OrdinalIgnoreCase))
         {
+            if (!sourceByFunctionName.TryGetValue(root, out OfflineWorkerSourcePayload? rootSource) ||
+                !CanCallFunctionWithoutArguments(rootSource))
+            {
+                _lastCoverageNotes.Add("离线未覆盖：入口需要参数，未自动调用 " + root);
+                continue;
+            }
             if (hasActiveForces)
             {
                 builder.AppendLine("  __canmon_apply_forces();");
@@ -978,6 +994,25 @@ internal static class SimulationCGenerator
         return returnType + " " + source.FunctionName + "();";
     }
 
+    private static bool CanCallFunctionWithoutArguments(OfflineWorkerSourcePayload source)
+    {
+        string joined = string.Join(" ", source.Lines.Take(12));
+        int brace = joined.IndexOf('{');
+        if (brace >= 0)
+        {
+            joined = joined[..brace];
+        }
+        string escapedName = Regex.Escape(source.FunctionName);
+        Match match = Regex.Match(joined, @"\b" + escapedName + @"\s*\((?<params>[^)]*)\)");
+        return !match.Success || IsEmptyParameterList(match.Groups["params"].Value);
+    }
+
+    private static bool IsEmptyParameterList(string parameters)
+    {
+        string text = Regex.Replace(parameters ?? "", @"\s+", "");
+        return text.Length == 0 || text.Equals("void", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static bool SourceDefinesFunction(OfflineWorkerSourcePayload source, string sanitized)
     {
         if (!IsValidIdentifier(source.FunctionName))
@@ -1028,6 +1063,7 @@ internal static class SimulationCGenerator
             {
                 line = functionPointerAssignment;
             }
+            line = NormalizeScalarCasts(line, source, coverageNotes);
             line = NormalizePointerSyntax(line, source, coverageNotes);
             if (line.Contains("sbit", StringComparison.Ordinal))
             {
@@ -1036,6 +1072,7 @@ internal static class SimulationCGenerator
             }
             string normalized = NormalizeComplexAccess(line, source, coverageNotes);
             line = normalized;
+            line = NormalizeSafeArithmetic(line, source, coverageNotes);
             builder.AppendLine(line);
             foreach (char ch in line)
             {
@@ -1121,6 +1158,19 @@ internal static class SimulationCGenerator
         return true;
     }
 
+    private static string NormalizeScalarCasts(string line, OfflineWorkerSourcePayload source, ISet<string> coverageNotes)
+    {
+        string normalized = Regex.Replace(
+            line,
+            @"\(\s*(?:const\s+|volatile\s+)*(?:signed\s+|unsigned\s+)?(?:char|short|int|long|float|double|bool|u8|u16|u32|s8|s16|s32|uint8|uint16|uint32|int8|int16|int32|uint8_t|uint16_t|uint32_t|int8_t|int16_t|int32_t|BYTE|WORD|DWORD|BOOL|size_t)\s*\)",
+            "");
+        if (!normalized.Equals(line, StringComparison.Ordinal))
+        {
+            coverageNotes.Add("离线未覆盖：标量类型转换已按仿真兼容处理（" + source.FunctionName + "）。");
+        }
+        return normalized;
+    }
+
     private static string NormalizePointerSyntax(string line, OfflineWorkerSourcePayload source, ISet<string> coverageNotes)
     {
         string normalized = Regex.Replace(
@@ -1175,6 +1225,28 @@ internal static class SimulationCGenerator
             }
         }
         return -1;
+    }
+
+    private static string NormalizeSafeArithmetic(string line, OfflineWorkerSourcePayload source, ISet<string> coverageNotes)
+    {
+        if ((!line.Contains('/') && !line.Contains('%')) || line.Contains('"', StringComparison.Ordinal))
+        {
+            return line;
+        }
+
+        string normalized = Regex.Replace(
+            line,
+            @"(?<!/)/(?!/)\s*(?<den>[A-Za-z_][A-Za-z0-9_]*\s*\([^;\r\n]*?\)|\([^;\r\n]*?\)|[0-9]+(?:\.[0-9]+)?|[A-Za-z_][A-Za-z0-9_]*)",
+            "/ __canmon_safe_den(${den})");
+        normalized = Regex.Replace(
+            normalized,
+            @"%\s*(?<den>[A-Za-z_][A-Za-z0-9_]*\s*\([^;\r\n]*?\)|\([^;\r\n]*?\)|[0-9]+(?:\.[0-9]+)?|[A-Za-z_][A-Za-z0-9_]*)",
+            "% __canmon_safe_mod_den((long long)(${den}))");
+        if (!normalized.Equals(line, StringComparison.Ordinal))
+        {
+            coverageNotes.Add("离线未覆盖：除法/取模分母已加零值保护（" + source.FunctionName + "）。");
+        }
+        return normalized;
     }
 
     private static string NormalizeComplexAccess(string line, OfflineWorkerSourcePayload source, ISet<string> coverageNotes)
@@ -1343,6 +1415,11 @@ internal static class SimulationCGenerator
     private static bool IsValidIdentifier(string value)
     {
         return Regex.IsMatch(value, @"^[A-Za-z_][A-Za-z0-9_]*$");
+    }
+
+    private static string BuildStubImplementationName(string name)
+    {
+        return "__canmon_stub_" + name;
     }
 
     private static string EscapeCString(string value)

@@ -46,6 +46,17 @@ can_monitor_latest.zip
 - 离线 worker 不能靠逐个客户工程“调教”；入口由调用图和通用 entry rules 自动发现，UI 可选择并保存项目入口配置；找不到入口时降级静态离线并显示候选/未覆盖诊断。
 - `OfflineWorkerSelfTest.ps1`、`OfflineRealProjectProbe.ps1`：用于离线 worker 本机验证。
 
+## 2026-06-15 离线内测结果
+
+使用 `OfflineRealProjectProbe.ps1` 对真实客户工程做应用层离线 smoke：
+
+- 采矿装药车：`E:\AI_划时代\T天腾\C采矿装药车\单独装药系统\小洪给我的版本（以此为准kx119_tt_zy）\乌拉特后旗装药车\keil5_中深孔\MC_LCD - 7Control_V1.2` 通过；自动入口 `work_logic, MyLogic_10ms, T_Y_Logic`；应用层源码 21 个。
+- 简约款劈裂车主工程：`E:\AI_划时代\T天腾\P劈裂车\简约款劈裂\显示屏7-200\MC_LCD - 7Control_V1.2` 通过；自动入口 `MyLogic_10ms, work_logic_Maual, work_logic`；应用层源码 18 个。
+- 简约款劈裂车 `ui_kl` 子工程：`E:\AI_划时代\T天腾\P劈裂车\简约款劈裂\显示屏7-200\ui_kl\MC_LCD - 7Control_V1.2` 通过；自动入口 `MyLogic_10ms, work_logic_Maual, work_logic`；应用层源码 18 个。
+- 湿喷机：`E:\AI_划时代\T天腾\湿喷机\MC_LCD - 7Control_V3.0dev210919_JJ` 通过；自动入口 `MyLogic_10ms, work_logic, qiangzhi_work_Frame`；应用层源码 29 个。
+
+本轮针对内测暴露的问题做了通用修复：常见数学函数由临时 `keil_compat.h` 提供；unresolved 底层函数使用可吞任意参数的 stub 宏；自动入口过滤带参数函数；默认 0 mock 导致的除法/取模分母为 0 时加仿真保护并记录未覆盖诊断。
+
 ## 当前已知风险
 
 - 离线 C worker 比早期正则模拟更接近真实 C 逻辑，但仍需要用客户真实工程继续探针验证。

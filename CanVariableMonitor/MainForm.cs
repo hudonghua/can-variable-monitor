@@ -5949,6 +5949,10 @@ public sealed partial class MainForm : Form
 			{
 				return;
 			}
+			if (!CanCallOfflineRootWithoutArguments(source))
+			{
+				return;
+			}
 
 			if (candidates.TryGetValue(source.FunctionName, out OfflineRootCandidate existing) &&
 				existing.Score >= score)
@@ -6152,6 +6156,25 @@ public sealed partial class MainForm : Form
 			.Where(part => part.Length > 0 && Regex.IsMatch(part, @"^[A-Za-z_][A-Za-z0-9_]*$"))
 			.Distinct(StringComparer.OrdinalIgnoreCase)
 			.ToList();
+	}
+
+	private static bool CanCallOfflineRootWithoutArguments(FunctionSourceView source)
+	{
+		string joined = string.Join(" ", source.Lines.Take(12));
+		int brace = joined.IndexOf('{');
+		if (brace >= 0)
+		{
+			joined = joined[..brace];
+		}
+		string escapedName = Regex.Escape(source.FunctionName);
+		Match match = Regex.Match(joined, @"\b" + escapedName + @"\s*\((?<params>[^)]*)\)");
+		return !match.Success || IsEmptyOfflineParameterList(match.Groups["params"].Value);
+	}
+
+	private static bool IsEmptyOfflineParameterList(string parameters)
+	{
+		string text = Regex.Replace(parameters ?? "", @"\s+", "");
+		return text.Length == 0 || text.Equals("void", StringComparison.OrdinalIgnoreCase);
 	}
 
 	private static bool IsOfflineApplicationSourceFile(string root, string filePath)
