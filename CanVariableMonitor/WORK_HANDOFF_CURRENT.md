@@ -141,6 +141,26 @@ can_monitor_latest.zip
 - `dotnet build .\CanVariableMonitor.OfflineCWorker\CanVariableMonitor.OfflineCWorker.csproj -v:minimal`：0 警告，0 错误。
 - `dotnet build .\CanVariableMonitor\CanVariableMonitor.csproj -v:minimal`：0 错误，59 个历史警告。
 
+## 2026-06-15 控制链 + 显示链离线合并修正
+
+用户指出：程序透视既然已经能判定控制链和显示链，离线模式也应该利用这两条链。当前修正方向不是写死 `MyLogic_10ms`、`work_logic`、`Disp_main` 等客户函数名，而是复用程序图谱已经识别出的“控制/业务链”和“显示输出集合”：
+
+- `MainForm.BuildOfflineApplicationRootSources()` 在自动 `__canmon_main_loop_tick` 之外，会从程序图谱补充控制链 root；已经能被主循环可达的控制函数不重复加 root。
+- 显示链 root 作为补充入口加入离线执行计划，用于把业务变量进一步整理到显示/屏幕缓存相关变量，日志会输出 `离线执行计划：已合并控制链 [...]，显示链 [...]`。
+- 为避免显示链把 EEPROM/Flash/I2C/AT24/参数保存等底层存储函数拖进 TinyCC，`LPC1765_Keil_AppStubPack` 新增硬边界判断；这类函数即使客户工程里有 C 定义，也不真实执行，调用点自动 stub/mock。
+- 保留上一轮原则：`DI_Scan()` 这类应用层简单扫描/赋值函数如果在应用源码中有定义，仍然真实编译执行，不再因为名字像底层输入就误 stub。
+- 调试/离线镜像窗口和看代码窗口的 C 代码样式改为共享同一套关键词、函数名、形参识别逻辑；关键词、函数名、形参颜色不再因为 Scintilla/RTF 两套渲染路径而不一致。
+
+验证结果：
+
+- `OfflineWorkerSelfTest.ps1`：通过；覆盖“控制入口 + 显示补充入口”同 tick 执行，并验证 `Sys_Write_BD()` 这类存储边界不会真实执行。
+- `dotnet build .\CanVariableMonitor.OfflineCWorker\CanVariableMonitor.OfflineCWorker.csproj -v:minimal`：0 警告，0 错误。
+- `dotnet build .\CanVariableMonitor\CanVariableMonitor.csproj -v:minimal`：0 错误，59 个历史警告。
+- `OfflineRealProjectProbe.ps1` 三个真实工程通过：
+  - 江南爆破中深孔编码器铁轮版：强制 `Shovels_up_DO=1` 后 `PWM_3A_119_CAN1=600`。
+  - 旭工干喷：强制 `Main_Pump_Current_up_DI=1` 后 `Paramet_Set1=5`。
+  - 华矿二代半液压主控：强制 `Hydraulic_Temperature_control_DI=1` 后 `Hydraulic_Temperature_control_DI_dly=499`。
+
 ## 绝对不要上传的内容
 
 不要把以下内容提交到这个仓库或任何交接包：

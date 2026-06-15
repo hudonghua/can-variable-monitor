@@ -228,6 +228,17 @@ internal sealed class LPC1765_Keil_AppStubPack
             IsLowLevelServiceFunctionName(name);
     }
 
+    public bool IsHardStubBoundaryFunctionName(string name)
+    {
+        return name.Equals("main", StringComparison.OrdinalIgnoreCase) ||
+            name.Equals("sprintf", StringComparison.OrdinalIgnoreCase) ||
+            name.Equals("snprintf", StringComparison.OrdinalIgnoreCase) ||
+            name.StartsWith("CanMonitor_", StringComparison.OrdinalIgnoreCase) ||
+            IsOutputRecordFunctionName(name) ||
+            IsLowLevelServiceFunctionName(name) ||
+            IsStorageBoundaryFunctionName(name);
+    }
+
     public bool IsInputMockFunctionName(string name)
     {
         if (string.IsNullOrWhiteSpace(name))
@@ -281,6 +292,19 @@ internal sealed class LPC1765_Keil_AppStubPack
         return name.Equals("delay_ms", StringComparison.OrdinalIgnoreCase) ||
             name.Equals("delay_us", StringComparison.OrdinalIgnoreCase) ||
             Regex.IsMatch(name, @"^(?:I2C|SPI|UART|USART|GPIO|CAN|ADC|PWM|EEPROM|FLASH|Timer|TIM)", RegexOptions.IgnoreCase);
+    }
+
+    private static bool IsStorageBoundaryFunctionName(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return false;
+        }
+
+        return Regex.IsMatch(name, @"(?:AT24|EEPROM|FLASH|I2C|IIC)", RegexOptions.IgnoreCase) ||
+            Regex.IsMatch(name, @"^(?:Sys_)?(?:Read|Write)_(?:BD|Info|Param|Retain)", RegexOptions.IgnoreCase) ||
+            Regex.IsMatch(name, @"^(?:Save|Store).*?(?:Retain|Param|Info|BD|Flash|EEPROM)", RegexOptions.IgnoreCase) ||
+            Regex.IsMatch(name, @"(?:Read|Write|Save|Store).*?(?:BD|Info|Param|Retain)(?:_|$)", RegexOptions.IgnoreCase);
     }
 
     private static string ToRelativePath(string root, string filePath)

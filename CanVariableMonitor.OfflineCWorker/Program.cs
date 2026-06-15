@@ -543,6 +543,20 @@ internal static class SimulationCGenerator
         List<(OfflineWorkerSourcePayload Source, string Text)> appSources = sanitizedSources
             .Where(item => SupportPack.IsApplicationSourceFile(project.WorkDirectory, item.Source.FilePath))
             .ToList();
+        List<string> hardBoundarySourceNames = appSources
+            .Where(item => SupportPack.IsHardStubBoundaryFunctionName(item.Source.FunctionName))
+            .Select(item => item.Source.FunctionName)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(20)
+            .ToList();
+        if (hardBoundarySourceNames.Count > 0)
+        {
+            _lastCoverageNotes.Add("离线未覆盖：底层/存储边界函数不真实执行，调用自动 stub/mock：" + string.Join(", ", hardBoundarySourceNames));
+        }
+        appSources = appSources
+            .Where(item => !SupportPack.IsHardStubBoundaryFunctionName(item.Source.FunctionName))
+            .ToList();
         List<string> excludedSourceNames = sanitizedSources
             .Where(item => !SupportPack.IsApplicationSourceFile(project.WorkDirectory, item.Source.FilePath))
             .Select(item => item.Source.FunctionName)

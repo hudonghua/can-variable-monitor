@@ -65,7 +65,7 @@ try {
     $project = [ordered]@{
         workDirectory = "C:\Temp\canmon_offline_selftest"
         signature = "offline-worker-selftest-app-chain"
-        rootFunctions = @("App_Tick10ms")
+        rootFunctions = @("App_Tick10ms", "DisplaySupplement")
         sources = @(
             [ordered]@{
                 functionName = "App_Tick10ms"
@@ -78,6 +78,7 @@ try {
                     "  App_BusinessStep();",
                     "  TaskHook();",
                     "  main();",
+                    "  Sys_Write_BD();",
                     "  CAN_SendFrame(0, 0);",
                     "}"
                 )
@@ -101,6 +102,28 @@ try {
                     "void DI_Scan(void)",
                     "{",
                     "  InputReady = 1;",
+                    "}"
+                )
+            },
+            [ordered]@{
+                functionName = "DisplaySupplement"
+                filePath = "App\display.c"
+                startLine = 35
+                lines = @(
+                    "void DisplaySupplement(void)",
+                    "{",
+                    "  DisplayCount = OutputCount;",
+                    "}"
+                )
+            },
+            [ordered]@{
+                functionName = "Sys_Write_BD"
+                filePath = "App\storage.c"
+                startLine = 38
+                lines = @(
+                    "void Sys_Write_BD(void)",
+                    "{",
+                    "  BadStorage = 9;",
                     "}"
                 )
             },
@@ -132,7 +155,9 @@ try {
             [ordered]@{ key = "ModeAuto"; name = "ModeAuto"; address = 2; size = 1; typeName = "uint8"; rawValue = 0; forceActive = $false; aliases = @("ModeAuto") },
             [ordered]@{ key = "OutputCount"; name = "OutputCount"; address = 3; size = 2; typeName = "uint16"; rawValue = 0; forceActive = $false; aliases = @("OutputCount") },
             [ordered]@{ key = "OutputLatch"; name = "OutputLatch"; address = 4; size = 1; typeName = "uint8"; rawValue = 0; forceActive = $false; aliases = @("OutputLatch") },
-            [ordered]@{ key = "TaskHook"; name = "TaskHook"; address = 5; size = 4; typeName = "uint32"; rawValue = 0; forceActive = $false; aliases = @("TaskHook") }
+            [ordered]@{ key = "TaskHook"; name = "TaskHook"; address = 5; size = 4; typeName = "uint32"; rawValue = 0; forceActive = $false; aliases = @("TaskHook") },
+            [ordered]@{ key = "DisplayCount"; name = "DisplayCount"; address = 6; size = 2; typeName = "uint16"; rawValue = 0; forceActive = $false; aliases = @("DisplayCount") },
+            [ordered]@{ key = "BadStorage"; name = "BadStorage"; address = 7; size = 1; typeName = "uint8"; rawValue = 0; forceActive = $false; aliases = @("BadStorage") }
         )
     }
 
@@ -147,8 +172,10 @@ try {
         $result = Send-WorkerCommand "RunTick" $null
         Assert-Equal $result.ok $true "RunTick $i failed"
         Assert-Equal $result.values.OutputCount $i "OutputCount did not advance on tick $i"
+        Assert-Equal $result.values.DisplayCount $i "Display supplement root did not observe control output on tick $i"
+        Assert-Equal $result.values.BadStorage 0 "Storage boundary Sys_Write_BD executed real body on tick $i"
         $stubWarnings = @($result.coverage | Where-Object { $_ -like "*stub*" })
-        $businessStubWarnings = @($stubWarnings | Where-Object { $_ -like "*业务调用被 stub*" -and $_ -notlike "*TaskHook*" })
+        $businessStubWarnings = @($stubWarnings | Where-Object { $_ -like "*业务调用被 stub*" -and $_ -notlike "*TaskHook*" -and $_ -notlike "*Sys_Write_BD*" })
         if ($businessStubWarnings.Count -gt 0) {
             throw "Business helper was stubbed during self-test: $($businessStubWarnings -join '; ')"
         }
@@ -174,6 +201,9 @@ try {
     if ($mainText -match "(?m)^\s+App_OutputLatch\(\);") {
         throw "App_OutputLatch was scheduled as a root. Helpers must be reached through App_Tick10ms -> App_BusinessStep only."
     }
+    if ($mainText -notmatch "(?m)^\s+DisplaySupplement\(\);") {
+        throw "DisplaySupplement was not scheduled as an additional root. Control and display roots must be able to run in one tick."
+    }
 
     if ($generated -notmatch "__canmon_record_output\(""CAN_SendFrame""\)") {
         throw "Output boundary CAN_SendFrame was not converted to output recording stub."
@@ -189,6 +219,12 @@ try {
     }
     if ($generated -notmatch "(?m)^#define\s+TaskHook\(\.\.\.\)\s+__canmon_stub_TaskHook\(\)\s*$") {
         throw "Function-like TaskHook() call was not converted to a callable stub macro."
+    }
+    if ($generated -match "void\s+Sys_Write_BD\s*\(\s*void\s*\)") {
+        throw "Storage boundary Sys_Write_BD() source was compiled. Storage/EEPROM boundaries must stay stubbed."
+    }
+    if ($generated -notmatch "(?m)^#define\s+Sys_Write_BD\(\.\.\.\)\s+__canmon_stub_Sys_Write_BD\(\)\s*$") {
+        throw "Storage boundary Sys_Write_BD() call was not converted to a stub macro."
     }
     if ($generated -notmatch "(?m)^#define\s+main\(\.\.\.\)\s+__canmon_stub_main\(\)\s*$") {
         throw "Customer main() reference was not converted to a stub macro."

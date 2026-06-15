@@ -42,6 +42,8 @@ public sealed partial class MainForm : Form
 
 	private readonly record struct InlineValueSpan(int Start, int Length, bool Fresh);
 
+	private readonly record struct CodeTokenStyleSpan(int Start, int Length, CodeTokenVisualKind Kind);
+
 	private readonly record struct ScintillaValueAnnotationRow(int LineIndex, string Text);
 
 	private readonly record struct OfflineFunctionCall(string Name, string Arguments);
@@ -68,6 +70,13 @@ public sealed partial class MainForm : Form
 		Unknown,
 		False,
 		True
+	}
+
+	private enum CodeTokenVisualKind
+	{
+		Normal,
+		FunctionName,
+		ParameterName
 	}
 
 	private enum BatchApplyResult
@@ -705,6 +714,10 @@ public sealed partial class MainForm : Form
 
 	private const int ScintillaStyleValueStale = 41;
 
+	private const int ScintillaStyleFunctionName = 42;
+
+	private const int ScintillaStyleParameterName = 43;
+
 	private const int SciEolAnnotationSetText = 2740;
 
 	private const int SciEolAnnotationSetStyle = 2742;
@@ -728,6 +741,19 @@ public sealed partial class MainForm : Form
 	private static readonly Color FixedCodeValueTagBackColor = Color.Empty;
 
 	private static readonly Color FixedCodeValueTagForeColor = Color.FromArgb(51, 51, 51);
+
+	private static readonly string[] CCodeKeywords =
+	{
+		"auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else", "enum",
+		"extern", "float", "for", "goto", "if", "inline", "int", "long", "register", "return", "short",
+		"signed", "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void",
+		"volatile", "while", "bool", "__irq", "__weak", "__asm", "__asm__", "__attribute__",
+		"uint8_t", "uint16_t", "uint32_t", "uint64_t", "int8_t", "int16_t", "int32_t", "int64_t",
+		"uint8", "uint16", "uint32", "uint64", "int8", "int16", "int32", "int64",
+		"u8", "u16", "u32", "u64", "s8", "s16", "s32", "s64"
+	};
+
+	private static readonly HashSet<string> CCodeKeywordSet = new(CCodeKeywords, StringComparer.Ordinal);
 
 	private Color _codeCommentColor = Color.FromArgb(74, 222, 128);
 
@@ -2679,13 +2705,17 @@ public sealed partial class MainForm : Form
 		editor.Styles[ScintillaStyleValueStale].BackColor = _codeValueTagInactiveBackColor;
 		editor.Styles[ScintillaStyleValueStale].ForeColor = _codeValueTagInactiveForeColor;
 		editor.Styles[ScintillaStyleValueStale].Bold = false;
-		editor.SetKeywords(0, string.Join(" ", new[]
-		{
-			"auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else", "enum",
-			"extern", "float", "for", "goto", "if", "inline", "int", "long", "register", "return", "short",
-			"signed", "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void",
-			"volatile", "while", "uint8_t", "uint16_t", "uint32_t", "int8_t", "int16_t", "int32_t"
-		}));
+		editor.Styles[ScintillaStyleFunctionName].Font = "Consolas";
+		editor.Styles[ScintillaStyleFunctionName].SizeF = _functionCodeFontSize;
+		editor.Styles[ScintillaStyleFunctionName].BackColor = _surface;
+		editor.Styles[ScintillaStyleFunctionName].ForeColor = _codeFunctionColor;
+		editor.Styles[ScintillaStyleFunctionName].Bold = false;
+		editor.Styles[ScintillaStyleParameterName].Font = "Consolas";
+		editor.Styles[ScintillaStyleParameterName].SizeF = _functionCodeFontSize;
+		editor.Styles[ScintillaStyleParameterName].BackColor = _surface;
+		editor.Styles[ScintillaStyleParameterName].ForeColor = _accent;
+		editor.Styles[ScintillaStyleParameterName].Bold = false;
+		editor.SetKeywords(0, string.Join(" ", CCodeKeywords));
 		editor.CaretLineVisible = false;
 		editor.CaretLineBackColor = Color.FromArgb(0, _surface);
 		editor.CaretLineLayer = ScintillaNET.Layer.UnderText;
@@ -5935,12 +5965,165 @@ public sealed partial class MainForm : Form
 			}
 		}
 
+		AddOfflineControlDisplayRootSources(directory, roots, seen, maxRoots: 20);
+
 		if (roots.Count == 0)
 		{
 			return BuildOfflineApplicationSources(directory, includeAnalysisSeeds: false);
 		}
 
 		return roots;
+	}
+
+	private void AddOfflineControlDisplayRootSources(string directory, List<FunctionSourceView> roots, HashSet<string> seen, int maxRoots)
+	{
+		if (roots.Count >= maxRoots)
+		{
+			return;
+		}
+
+		ProgramGraphSnapshot? snapshot = _programGraphSnapshot;
+		if (snapshot == null || !snapshot.Success)
+		{
+			return;
+		}
+
+		List<ProgramCallGraphNode> graphNodes = GetAllGraphNodes(snapshot)
+			.Where(n => !IsProgramGraphNoiseNode(n))
+			.DistinctBy(n => n.Id)
+			.ToList();
+		if (graphNodes.Count == 0)
+		{
+			return;
+		}
+
+		HashSet<string> reachableNames = ExpandOfflineReachableSources(directory, roots, 800)
+			.Select(source => source.FunctionName)
+			.ToHashSet(StringComparer.OrdinalIgnoreCase);
+		var addedControl = new List<string>();
+		var addedDisplay = new List<string>();
+
+		void TryAddChainRoot(ProgramCallGraphNode node, bool displayChain, bool allowReachableSupplement)
+		{
+			if (roots.Count >= maxRoots ||
+				node.Name.Equals("main", StringComparison.OrdinalIgnoreCase) ||
+				seen.Contains(node.Name) ||
+				(!allowReachableSupplement && reachableNames.Contains(node.Name)))
+			{
+				return;
+			}
+
+			if (!TryLoadFunctionSource(directory, node.Name, out FunctionSourceView? source) ||
+				source == null ||
+				!IsOfflineApplicationSourceFile(directory, source.FilePath) ||
+				!CanCallOfflineRootWithoutArguments(source))
+			{
+				return;
+			}
+
+			if (!seen.Add(source.FunctionName))
+			{
+				return;
+			}
+
+			roots.Add(source);
+			reachableNames.Add(source.FunctionName);
+			if (displayChain)
+			{
+				addedDisplay.Add(source.FunctionName);
+			}
+			else
+			{
+				addedControl.Add(source.FunctionName);
+			}
+		}
+
+		foreach (ProgramCallGraphNode node in BuildOfflineControlChainRootNodes(snapshot, graphNodes))
+		{
+			TryAddChainRoot(node, displayChain: false, allowReachableSupplement: false);
+			if (roots.Count >= maxRoots)
+			{
+				break;
+			}
+		}
+
+		foreach (ProgramCallGraphNode node in FindDisplayRoots(graphNodes))
+		{
+			TryAddChainRoot(node, displayChain: true, allowReachableSupplement: true);
+			if (roots.Count >= maxRoots)
+			{
+				break;
+			}
+		}
+
+		if (addedControl.Count > 0 || addedDisplay.Count > 0)
+		{
+			string controlText = addedControl.Count == 0 ? "无新增" : string.Join(", ", addedControl.Take(6));
+			string displayText = addedDisplay.Count == 0 ? "无新增" : string.Join(", ", addedDisplay.Take(6));
+			LogOfflineCWorkerIssue($"离线执行计划：已合并控制链 [{controlText}]，显示链 [{displayText}]。", force: false);
+		}
+	}
+
+	private IEnumerable<ProgramCallGraphNode> BuildOfflineControlChainRootNodes(ProgramGraphSnapshot snapshot, IReadOnlyList<ProgramCallGraphNode> graphNodes)
+	{
+		var yielded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+		bool AddNode(ProgramCallGraphNode? node, List<ProgramCallGraphNode> target)
+		{
+			if (node == null ||
+				IsProgramGraphNoiseNode(node) ||
+				IsDisplayGraphNode(node) ||
+				node.Kind.Equals("driver", StringComparison.OrdinalIgnoreCase) ||
+				node.Kind.Equals("storage", StringComparison.OrdinalIgnoreCase) ||
+				!yielded.Add(node.Id))
+			{
+				return false;
+			}
+
+			target.Add(node);
+			return true;
+		}
+
+		var result = new List<ProgramCallGraphNode>();
+		ProgramCallGraphNode? controlRoot = FindControlBusinessRoot(graphNodes);
+		if (controlRoot != null && !controlRoot.Name.Equals("main", StringComparison.OrdinalIgnoreCase))
+		{
+			AddNode(controlRoot, result);
+		}
+
+		if (controlRoot != null)
+		{
+			foreach (ProgramCallGraphNode child in GetGraphLinkedNodes(controlRoot.Id, callers: false)
+				.Where(n => !IsDisplayGraphNode(n))
+				.OrderByDescending(n => ScoreOfflineRootCandidate(n, includeAnalysisSeeds: false))
+				.ThenByDescending(n => n.Outgoing)
+				.ThenBy(n => n.Name, StringComparer.OrdinalIgnoreCase)
+				.Take(12))
+			{
+				AddNode(child, result);
+			}
+		}
+
+		Dictionary<string, ProgramCallGraphNode> byName = graphNodes
+			.GroupBy(n => n.Name, StringComparer.OrdinalIgnoreCase)
+			.ToDictionary(group => group.Key, group => group.OrderBy(n => n.Level).ThenByDescending(n => n.Outgoing).First(), StringComparer.OrdinalIgnoreCase);
+		foreach (ProgramFrameworkStep step in snapshot.FrameworkSteps)
+		{
+			if (byName.TryGetValue(step.FunctionName, out ProgramCallGraphNode? node))
+			{
+				AddNode(node, result);
+			}
+		}
+
+		foreach (ProgramFunctionInfo info in snapshot.FlowFunctions.Take(18))
+		{
+			if (byName.TryGetValue(info.Name, out ProgramCallGraphNode? node))
+			{
+				AddNode(node, result);
+			}
+		}
+
+		return result;
 	}
 
 	private bool TryBuildOfflineMainLoopTickSource(string directory, out FunctionSourceView? source)
@@ -10087,38 +10270,7 @@ public sealed partial class MainForm : Form
 
 	private static bool IsCKeywordToken(string name)
 	{
-		return name.Equals("auto", StringComparison.Ordinal) ||
-			name.Equals("break", StringComparison.Ordinal) ||
-			name.Equals("case", StringComparison.Ordinal) ||
-			name.Equals("char", StringComparison.Ordinal) ||
-			name.Equals("const", StringComparison.Ordinal) ||
-			name.Equals("continue", StringComparison.Ordinal) ||
-			name.Equals("default", StringComparison.Ordinal) ||
-			name.Equals("do", StringComparison.Ordinal) ||
-			name.Equals("double", StringComparison.Ordinal) ||
-			name.Equals("else", StringComparison.Ordinal) ||
-			name.Equals("enum", StringComparison.Ordinal) ||
-			name.Equals("extern", StringComparison.Ordinal) ||
-			name.Equals("float", StringComparison.Ordinal) ||
-			name.Equals("for", StringComparison.Ordinal) ||
-			name.Equals("goto", StringComparison.Ordinal) ||
-			name.Equals("if", StringComparison.Ordinal) ||
-			name.Equals("int", StringComparison.Ordinal) ||
-			name.Equals("long", StringComparison.Ordinal) ||
-			name.Equals("register", StringComparison.Ordinal) ||
-			name.Equals("return", StringComparison.Ordinal) ||
-			name.Equals("short", StringComparison.Ordinal) ||
-			name.Equals("signed", StringComparison.Ordinal) ||
-			name.Equals("sizeof", StringComparison.Ordinal) ||
-			name.Equals("static", StringComparison.Ordinal) ||
-			name.Equals("struct", StringComparison.Ordinal) ||
-			name.Equals("switch", StringComparison.Ordinal) ||
-			name.Equals("typedef", StringComparison.Ordinal) ||
-			name.Equals("union", StringComparison.Ordinal) ||
-			name.Equals("unsigned", StringComparison.Ordinal) ||
-			name.Equals("void", StringComparison.Ordinal) ||
-			name.Equals("volatile", StringComparison.Ordinal) ||
-			name.Equals("while", StringComparison.Ordinal);
+		return !string.IsNullOrWhiteSpace(name) && CCodeKeywordSet.Contains(name.ToLowerInvariant());
 	}
 
 	private static Match FindFunctionDefinitionMatch(string text, string functionName)
@@ -17323,6 +17475,7 @@ public sealed partial class MainForm : Form
 			_functionCodeBox.Text = nextText;
 		}
 
+		ApplyScintillaSemanticStyles(renderedLines);
 		if (includeValues)
 		{
 			ApplyScintillaRuntimeHighlights(renderedLines, renderSource);
@@ -17362,6 +17515,101 @@ public sealed partial class MainForm : Form
 		UpdateScintillaScopeHighlight(force: true);
 
 		ForceCodeBoxLeftAligned(targetBox: _functionCodeBox);
+	}
+
+	private void ApplyScintillaSemanticStyles(IReadOnlyList<CodeLineRender> renderedLines)
+	{
+		if (_codeEditor == null || _codeEditor.IsDisposed || _codeEditor.TextLength == 0)
+		{
+			return;
+		}
+
+		bool inBlockComment = false;
+		for (int lineIndex = 0; lineIndex < renderedLines.Count && lineIndex < _codeEditor.Lines.Count; lineIndex++)
+		{
+			string line = renderedLines[lineIndex].Code;
+			int index = 0;
+			while (index < line.Length)
+			{
+				if (inBlockComment)
+				{
+					int end = line.IndexOf("*/", index, StringComparison.Ordinal);
+					if (end < 0)
+					{
+						break;
+					}
+
+					index = end + 2;
+					inBlockComment = false;
+					continue;
+				}
+
+				CommentStart comment = FindNextCommentStart(line, index);
+				int codeEnd = comment.Index >= 0 ? comment.Index : line.Length;
+				if (codeEnd > index)
+				{
+					ApplyScintillaSemanticStylesToCodeSegment(lineIndex, line, index, codeEnd - index);
+				}
+
+				if (comment.Index < 0 || comment.IsLineComment)
+				{
+					break;
+				}
+
+				int blockEnd = line.IndexOf("*/", comment.Index + 2, StringComparison.Ordinal);
+				if (blockEnd < 0)
+				{
+					inBlockComment = true;
+					break;
+				}
+
+				index = blockEnd + 2;
+			}
+		}
+	}
+
+	private void ApplyScintillaSemanticStylesToCodeSegment(int lineIndex, string line, int segmentStart, int segmentLength)
+	{
+		if (_codeEditor == null || segmentLength <= 0)
+		{
+			return;
+		}
+
+		string segment = line.Substring(segmentStart, segmentLength);
+		foreach (CodeTokenStyleSpan span in BuildCodeSemanticStyleSpans(segment))
+		{
+			int sourceStart = segmentStart + span.Start;
+			if (sourceStart < 0 || sourceStart >= line.Length)
+			{
+				continue;
+			}
+
+			int start = GetScintillaLinePositionFromCharIndex(lineIndex, line, sourceStart);
+			int safeLength = Math.Min(span.Length, line.Length - sourceStart);
+			int length = Encoding.UTF8.GetByteCount(line.Substring(sourceStart, safeLength));
+			int style = span.Kind == CodeTokenVisualKind.ParameterName
+				? ScintillaStyleParameterName
+				: ScintillaStyleFunctionName;
+			if (length <= 0 || start < 0 || start >= _codeEditor.TextLength)
+			{
+				continue;
+			}
+
+			try
+			{
+				_codeEditor.StartStyling(start);
+				_codeEditor.SetStyling(Math.Min(length, _codeEditor.TextLength - start), style);
+			}
+			catch (Exception ex)
+			{
+				DateTime now = DateTime.UtcNow;
+				if ((now - _lastInlineValueStyleLogUtc).TotalSeconds >= 30)
+				{
+					_lastInlineValueStyleLogUtc = now;
+					Log("代码样式刷新失败：" + ex.Message);
+				}
+			}
+		}
 	}
 
 	private void ApplyScintillaRuntimeHighlights(IReadOnlyList<CodeLineRender> renderedLines, FunctionSourceView renderSource)
@@ -18143,6 +18391,7 @@ public sealed partial class MainForm : Form
 
 	private void AppendCodeTokensRtf(StringBuilder builder, string text, int lineHighlightIndex = 0)
 	{
+		List<CodeTokenStyleSpan> styleSpans = BuildCodeSemanticStyleSpans(text);
 		int index = 0;
 		while (index < text.Length)
 		{
@@ -18194,9 +18443,17 @@ public sealed partial class MainForm : Form
 			{
 				color = 6;
 			}
-			else if (LooksLikeFunctionCall(text, index))
+			else
 			{
-				color = 5;
+				CodeTokenVisualKind kind = FindCodeTokenVisualKind(styleSpans, tokenStart, index - tokenStart);
+				if (kind == CodeTokenVisualKind.ParameterName)
+				{
+					color = 3;
+				}
+				else if (kind == CodeTokenVisualKind.FunctionName)
+				{
+					color = 5;
+				}
 			}
 			AppendRtfText(builder, token, color);
 		}
@@ -18344,6 +18601,7 @@ public sealed partial class MainForm : Form
 
 	private void AppendCodeTokens(string text)
 	{
+		List<CodeTokenStyleSpan> styleSpans = BuildCodeSemanticStyleSpans(text);
 		int index = 0;
 		while (index < text.Length)
 		{
@@ -18367,9 +18625,17 @@ public sealed partial class MainForm : Form
 			{
 				color = _codeKeywordColor;
 			}
-			else if (LooksLikeFunctionCall(text, index))
+			else
 			{
-				color = _codeFunctionColor;
+				CodeTokenVisualKind kind = FindCodeTokenVisualKind(styleSpans, start, index - start);
+				if (kind == CodeTokenVisualKind.ParameterName)
+				{
+					color = _accent;
+				}
+				else if (kind == CodeTokenVisualKind.FunctionName)
+				{
+					color = _codeFunctionColor;
+				}
 			}
 
 			AppendCodeText(token, color);
@@ -18432,6 +18698,172 @@ public sealed partial class MainForm : Form
 		return new CommentStart(-1, false);
 	}
 
+	private static List<CodeTokenStyleSpan> BuildCodeSemanticStyleSpans(string text)
+	{
+		var spans = new List<CodeTokenStyleSpan>();
+		List<CodeTokenStyleSpan> parameterSpans = BuildFunctionParameterNameSpans(text);
+		int index = 0;
+		while (index < text.Length)
+		{
+			if (!IsIdentifierStart(text[index]))
+			{
+				index++;
+				continue;
+			}
+
+			int start = index;
+			index++;
+			while (index < text.Length && IsIdentifierChar(text[index]))
+			{
+				index++;
+			}
+
+			string token = text.Substring(start, index - start);
+			if (IsCKeywordToken(token))
+			{
+				continue;
+			}
+
+			CodeTokenVisualKind parameterKind = FindCodeTokenVisualKind(parameterSpans, start, index - start);
+			if (parameterKind == CodeTokenVisualKind.ParameterName)
+			{
+				spans.Add(new CodeTokenStyleSpan(start, index - start, CodeTokenVisualKind.ParameterName));
+			}
+			else if (LooksLikeFunctionCall(text, index))
+			{
+				spans.Add(new CodeTokenStyleSpan(start, index - start, CodeTokenVisualKind.FunctionName));
+			}
+		}
+
+		return spans;
+	}
+
+	private static List<CodeTokenStyleSpan> BuildFunctionParameterNameSpans(string text)
+	{
+		var spans = new List<CodeTokenStyleSpan>();
+		int index = 0;
+		while (index < text.Length)
+		{
+			if (!IsIdentifierStart(text[index]))
+			{
+				index++;
+				continue;
+			}
+
+			int tokenStart = index;
+			index++;
+			while (index < text.Length && IsIdentifierChar(text[index]))
+			{
+				index++;
+			}
+
+			string token = text.Substring(tokenStart, index - tokenStart);
+			if (IsCKeywordToken(token) || !LooksLikeFunctionDefinitionIdentifierAtPosition(text, tokenStart, index - tokenStart))
+			{
+				continue;
+			}
+
+			int open = SkipWhitespace(text, index);
+			if (open >= text.Length || text[open] != '(')
+			{
+				continue;
+			}
+
+			int close = FindMatchingParenthesis(text, open);
+			if (close <= open)
+			{
+				continue;
+			}
+
+			AddParameterNameSpans(text, open + 1, close, spans);
+			index = close + 1;
+		}
+
+		return spans;
+	}
+
+	private static void AddParameterNameSpans(string text, int start, int end, List<CodeTokenStyleSpan> spans)
+	{
+		int segmentStart = start;
+		int depth = 0;
+		for (int i = start; i <= end; i++)
+		{
+			bool flush = i == end || (text[i] == ',' && depth == 0);
+			if (!flush)
+			{
+				if (text[i] == '(' || text[i] == '[')
+				{
+					depth++;
+				}
+				else if ((text[i] == ')' || text[i] == ']') && depth > 0)
+				{
+					depth--;
+				}
+				continue;
+			}
+
+			AddSingleParameterNameSpan(text, segmentStart, i, spans);
+			segmentStart = i + 1;
+		}
+	}
+
+	private static void AddSingleParameterNameSpan(string text, int start, int end, List<CodeTokenStyleSpan> spans)
+	{
+		if (end <= start)
+		{
+			return;
+		}
+
+		string segment = text.Substring(start, end - start);
+		if (string.IsNullOrWhiteSpace(segment) || segment.Contains("...", StringComparison.Ordinal))
+		{
+			return;
+		}
+
+		List<Match> allIdentifiers = Regex.Matches(segment, @"[A-Za-z_][A-Za-z0-9_]*")
+			.Cast<Match>()
+			.ToList();
+		List<Match> identifiers = allIdentifiers
+			.Where(match => !IsCKeywordToken(match.Value))
+			.ToList();
+		if (identifiers.Count == 0)
+		{
+			return;
+		}
+
+		Match candidate = identifiers[^1];
+		bool hasTypeHintBeforeName = allIdentifiers.Any(match => match.Index < candidate.Index && IsCKeywordToken(match.Value));
+		if (identifiers.Count == 1 && !segment.Contains('*') && !segment.Contains('[') && !hasTypeHintBeforeName)
+		{
+			return;
+		}
+
+		spans.Add(new CodeTokenStyleSpan(start + candidate.Index, candidate.Length, CodeTokenVisualKind.ParameterName));
+	}
+
+	private static CodeTokenVisualKind FindCodeTokenVisualKind(IReadOnlyList<CodeTokenStyleSpan> spans, int start, int length)
+	{
+		foreach (CodeTokenStyleSpan span in spans)
+		{
+			if (span.Start == start && span.Length == length)
+			{
+				return span.Kind;
+			}
+		}
+
+		return CodeTokenVisualKind.Normal;
+	}
+
+	private static int SkipWhitespace(string text, int index)
+	{
+		while (index < text.Length && char.IsWhiteSpace(text[index]))
+		{
+			index++;
+		}
+
+		return index;
+	}
+
 	private static bool LooksLikeFunctionCall(string text, int index)
 	{
 		int i = index;
@@ -18440,6 +18872,37 @@ public sealed partial class MainForm : Form
 			i++;
 		}
 		return i < text.Length && text[i] == '(';
+	}
+
+	private static bool LooksLikeFunctionDefinitionIdentifierAtPosition(string text, int start, int length)
+	{
+		if (start < 0 || length <= 0 || start + length > text.Length)
+		{
+			return false;
+		}
+
+		int open = SkipWhitespace(text, start + length);
+		if (open >= text.Length || text[open] != '(')
+		{
+			return false;
+		}
+
+		int lineStart = text.LastIndexOf('\n', start);
+		lineStart = lineStart < 0 ? 0 : lineStart + 1;
+		string prefix = text.Substring(lineStart, start - lineStart).TrimStart();
+		if (prefix.Length == 0 ||
+			prefix.Contains('=') ||
+			prefix.Contains('.') ||
+			prefix.Contains("->", StringComparison.Ordinal) ||
+			Regex.IsMatch(prefix, @"\b(?:if|for|while|switch|return|sizeof)\b", RegexOptions.IgnoreCase))
+		{
+			return false;
+		}
+
+		return Regex.IsMatch(
+			prefix,
+			@"^(?:static\s+|extern\s+|inline\s+|const\s+|volatile\s+|unsigned\s+|signed\s+|register\s+|__irq\s+|__weak\s+)*(?:void|bool|char|short|int|long|float|double|uint\d*_t|int\d*_t|uint\d+|int\d+|u\d+|s\d+|[A-Za-z_][A-Za-z0-9_]*(?:\s+\*+|\s*\*+)?)\s+[*\s]*$",
+			RegexOptions.IgnoreCase);
 	}
 
 	private static bool IsFunctionCallIdentifierAtPosition(string text, int start, int length)
