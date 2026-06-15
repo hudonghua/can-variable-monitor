@@ -71,6 +71,22 @@ can_monitor_latest.zip
 - 在线模式以控制器真实 RAM 为准，不应被离线 worker 逻辑影响。
 - 版本号近期用于测试在线更新，修改版本时要同步确认服务器 manifest。
 
+## 2026-06-15 离线变量不刷新修正
+
+用户现场确认界面布局已经可用，但进入离线模式后代码旁/变量表看起来没有跑。复查后根因不是 worker 没执行，而是 UI 离线轮询仍以 `GetEnabledWatchSnapshot()` 的 100 个当前轮询项作为唯一回填范围；worker 里由完整调用图绑定并已变化的应用层变量，如果没有进入这 100 个，就不会写回真实 `_watchItems`，界面表现为变量不动。
+
+本轮修正：
+
+- `EnsureOfflineApplicationWatchItems()` 改为优先使用完整 `OfflineProgramModel.Sources`，自动加入 reachable 应用层变量，而不是只扫入口附近源码。
+- `PollOfflineSimulation()` 在 worker tick 后通过 `BuildOfflineWorkerRefreshItems()` 合并当前轮询项和 `model.Bindings`。
+- `BuildOfflineWorkerRefreshItems()` 会把模型绑定映射回真实 `_watchItems` 对象；模型克隆对象不直接排队刷新，避免 `FlushPendingWatchUpdates()` 跳过导致统计虚高。
+
+验证结果：
+
+- `dotnet build .\CanVariableMonitor\CanVariableMonitor.csproj -v:minimal`：0 错误，59 个历史警告。
+- `OfflineWorkerSelfTest.ps1`：通过，应用层链路连续 tick，底层 `CAN_SendFrame` 被记录为输出 stub。
+- `OfflineRealProjectProbe.ps1` 三个真实工程通过：旭工干喷、江南爆破中深孔编码器铁轮版、华矿二代半液压主控。三者均以 `__canmon_main_loop_tick` 为离线入口，强制输入后目标变量变化。
+
 ## 绝对不要上传的内容
 
 不要把以下内容提交到这个仓库或任何交接包：

@@ -5549,7 +5549,8 @@ public sealed partial class MainForm : Form
 			return;
 		}
 
-		IReadOnlyList<FunctionSourceView> sources = GetOfflineApplicationSources();
+		OfflineProgramModel? model = GetOfflineProgramModel();
+		IReadOnlyList<FunctionSourceView> sources = model?.Sources ?? GetOfflineApplicationSources();
 		if (sources.Count == 0)
 		{
 			return;
@@ -6485,8 +6486,9 @@ public sealed partial class MainForm : Form
 			}
 		}
 
-		int refreshed = RefreshOfflineWatchValuesFromWorker(watchItems, model);
-		return new PollCycleStats(watchItems.Count, ran ? 1 : 0, refreshed, shouldExecute && !ran ? 1 : 0, 0);
+		IReadOnlyList<WatchItem> refreshItems = BuildOfflineWorkerRefreshItems(watchItems, model);
+		int refreshed = RefreshOfflineWatchValuesFromWorker(refreshItems, model);
+		return new PollCycleStats(refreshItems.Count, ran ? 1 : 0, refreshed, shouldExecute && !ran ? 1 : 0, 0);
 	}
 
 	private bool TryConsumeOfflineStepRequest()
@@ -6579,6 +6581,51 @@ public sealed partial class MainForm : Form
 			refreshed++;
 		}
 		return refreshed;
+	}
+
+	private IReadOnlyList<WatchItem> BuildOfflineWorkerRefreshItems(IReadOnlyList<WatchItem> priorityWatchItems, OfflineProgramModel model)
+	{
+		Dictionary<string, WatchItem> actualItems = new Dictionary<string, WatchItem>(StringComparer.OrdinalIgnoreCase);
+		foreach (WatchItem item in _watchItems)
+		{
+			if (item.Enabled && !item.IsChild)
+			{
+				actualItems[GetSimulationKey(item)] = item;
+			}
+		}
+
+		List<WatchItem> refreshItems = new List<WatchItem>();
+		HashSet<string> added = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+		void AddActual(WatchItem item, bool requireExisting)
+		{
+			if (!item.Enabled || item.IsChild)
+			{
+				return;
+			}
+			string key = GetSimulationKey(item);
+			if (actualItems.TryGetValue(key, out WatchItem? actualItem))
+			{
+				item = actualItem;
+			}
+			else if (requireExisting)
+			{
+				return;
+			}
+			if (added.Add(key))
+			{
+				refreshItems.Add(item);
+			}
+		}
+
+		foreach (WatchItem item in priorityWatchItems)
+		{
+			AddActual(item, requireExisting: false);
+		}
+		foreach (WatchItem item in model.Bindings)
+		{
+			AddActual(item, requireExisting: true);
+		}
+		return refreshItems;
 	}
 
 	private OfflineWorkerProjectPayload BuildOfflineCWorkerProjectPayload(
