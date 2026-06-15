@@ -73,11 +73,13 @@ can_monitor_latest.zip
 
 ## 2026-06-15 离线变量不刷新修正
 
-用户现场确认界面布局已经可用，但进入离线模式后代码旁/变量表看起来没有跑。复查后根因不是 worker 没执行，而是 UI 离线轮询仍以 `GetEnabledWatchSnapshot()` 的 100 个当前轮询项作为唯一回填范围；worker 里由完整调用图绑定并已变化的应用层变量，如果没有进入这 100 个，就不会写回真实 `_watchItems`，界面表现为变量不动。
+用户现场确认界面布局已经可用，但进入离线模式后代码旁/变量表看起来没有跑。注意：离线模式没有 100 个变量容量限制，`IsWatchCapacityLimited()` 在离线时返回 `false`，`GetEnabledWatchSnapshot()` 会允许全量 enabled watch items。前一版交接里把在线容量限制误写成离线根因，这是错误表述。
+
+本轮实际修正点是离线 UI 数据闭环：自动变量发现应基于完整 reachable application sources，而不是只看候选/入口 seed sources；worker 程序模型里的变量绑定也必须映射回真实 `_watchItems` 对象后再刷新，否则模型克隆对象即使有快照值，也不会被 `FlushPendingWatchUpdates()` 应用到界面。
 
 本轮修正：
 
-- `EnsureOfflineApplicationWatchItems()` 改为优先使用完整 `OfflineProgramModel.Sources`，自动加入 reachable 应用层变量，而不是只扫入口附近源码。
+- `EnsureOfflineApplicationWatchItems()` 改为优先使用完整 `OfflineProgramModel.Sources`，自动加入 reachable 应用层变量，而不是只扫入口/候选 seed sources。
 - `PollOfflineSimulation()` 在 worker tick 后通过 `BuildOfflineWorkerRefreshItems()` 合并当前轮询项和 `model.Bindings`。
 - `BuildOfflineWorkerRefreshItems()` 会把模型绑定映射回真实 `_watchItems` 对象；模型克隆对象不直接排队刷新，避免 `FlushPendingWatchUpdates()` 跳过导致统计虚高。
 
