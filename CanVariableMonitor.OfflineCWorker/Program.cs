@@ -515,7 +515,7 @@ internal static class SimulationCGenerator
     private static readonly HashSet<string> BuiltinFunctionNames = new(StringComparer.OrdinalIgnoreCase)
     {
         "printf", "strlen", "strcpy", "strncpy", "memcpy", "memset", "memcmp",
-        "abs", "labs", "llabs"
+        "abs", "labs", "llabs", "_BitV"
     };
 
     public static string Generate(
@@ -560,6 +560,9 @@ internal static class SimulationCGenerator
                 }
             }
         }
+
+        AddGenerationCoverage(project, definedFunctionNames, calledFunctions);
+
         foreach (string note in notes.Take(16))
         {
             _lastCoverageNotes.Add(note);
@@ -712,6 +715,55 @@ internal static class SimulationCGenerator
         builder.AppendLine("  return 0;");
         builder.AppendLine("}");
         return builder.ToString();
+    }
+
+    private static void AddGenerationCoverage(
+        OfflineWorkerProjectPayload project,
+        IReadOnlySet<string> definedFunctionNames,
+        IReadOnlySet<string> calledFunctions)
+    {
+        string roots = string.Join(", ", project.RootFunctions
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Distinct(StringComparer.OrdinalIgnoreCase));
+        if (roots.Length == 0)
+        {
+            roots = "none";
+        }
+        _lastCoverageNotes.Add("离线覆盖：入口 " + roots + "；定义函数 " + definedFunctionNames.Count.ToString(CultureInfo.InvariantCulture) + " 个。");
+
+        List<string> missingRoots = project.RootFunctions
+            .Where(name => !string.IsNullOrWhiteSpace(name) && !definedFunctionNames.Contains(name))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(12)
+            .ToList();
+        if (missingRoots.Count > 0)
+        {
+            _lastCoverageNotes.Add("离线未覆盖：入口未生成定义 " + string.Join(", ", missingRoots));
+        }
+
+        List<string> suspiciousStubs = calledFunctions
+            .Where(IsLikelyBusinessFunctionStub)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+            .Take(24)
+            .ToList();
+        if (suspiciousStubs.Count > 0)
+        {
+            _lastCoverageNotes.Add("离线未覆盖：业务调用被 stub " + string.Join(", ", suspiciousStubs));
+        }
+    }
+
+    private static bool IsLikelyBusinessFunctionStub(string name)
+    {
+        if (!IsValidIdentifier(name) ||
+            CKeywords.Contains(name) ||
+            BuiltinFunctionNames.Contains(name) ||
+            IsStubOnlyFunctionName(name))
+        {
+            return false;
+        }
+
+        return true;
     }
 
     private static HashSet<string> BuildForcedAliases(
@@ -938,6 +990,7 @@ internal static class SimulationCGenerator
         builder.AppendLine("#define idata");
         builder.AppendLine("#define pdata");
         builder.AppendLine("#define code");
+        builder.AppendLine("static long long _BitV(long long v, long long b) { return (b >= 0 && b < 63 && ((v & (1LL << b)) == (1LL << b))) ? 1 : 0; }");
     }
 
     private static string BuildFunctionPrototype(OfflineWorkerSourcePayload source)

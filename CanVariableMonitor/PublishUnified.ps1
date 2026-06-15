@@ -124,17 +124,31 @@ $zipPath = Join-Path $releaseDir ($appName + '_' + $version + '_' + $stamp + '.z
 Compress-Archive -LiteralPath (Get-ChildItem -LiteralPath $publishDir -Force).FullName -DestinationPath $zipPath -Force
 $latestZipPath = Join-Path $releaseDir ($appName + '_latest.zip')
 Copy-Item -LiteralPath $zipPath -Destination $latestZipPath -Force
+$serverPackagePath = Join-Path $releaseDir ('can_monitor_' + $version + '_' + $stamp + '.zip')
+$serverLatestPackagePath = Join-Path $releaseDir 'can_monitor_latest.zip'
+Copy-Item -LiteralPath $zipPath -Destination $serverPackagePath -Force
+Copy-Item -LiteralPath $zipPath -Destination $serverLatestPackagePath -Force
 $zipHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $manifest = [ordered]@{
     version = $version
     channel = 'stable'
-    packageUrl = [System.IO.Path]::GetFileName($zipPath)
+    packageUrl = 'can_monitor_latest.zip'
     sha256 = $zipHash
     releaseNotes = ''
     force = $false
 }
 $manifestPath = Join-Path $releaseDir 'update_manifest.json'
 $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+
+$serverUploadDir = Join-Path $releaseDir 'server_upload'
+if (Test-Path -LiteralPath $serverUploadDir) {
+    Remove-Item -LiteralPath $serverUploadDir -Recurse -Force
+}
+New-Item -ItemType Directory -Path $serverUploadDir | Out-Null
+Copy-Item -LiteralPath $serverLatestPackagePath -Destination (Join-Path $serverUploadDir 'can_monitor_latest.zip') -Force
+Copy-Item -LiteralPath $manifestPath -Destination (Join-Path $serverUploadDir 'update_manifest.json') -Force
+$serverUploadZipPath = Join-Path $releaseDir ('server_upload_' + $version + '_' + $stamp + '.zip')
+Compress-Archive -LiteralPath (Get-ChildItem -LiteralPath $serverUploadDir -Force).FullName -DestinationPath $serverUploadZipPath -Force
 
 Write-Host ''
 Write-Host "Customer package ready:"
@@ -145,5 +159,9 @@ Write-Host "Release zip:"
 Write-Host $zipPath
 Write-Host "Latest alias zip:"
 Write-Host $latestZipPath
+Write-Host "ASCII latest package:"
+Write-Host $serverLatestPackagePath
 Write-Host "Update manifest:"
 Write-Host $manifestPath
+Write-Host "Server upload zip:"
+Write-Host $serverUploadZipPath

@@ -1,41 +1,29 @@
 # 上位机监控
 
-关键词：上位机监控、CAN 上位机、Keil 变量监控、在线监控、离线模拟、固件同步。
+关键词：上位机监控、CAN 上位机、Keil 变量监控、在线监控、离线模拟、固件同步、自动更新。
 
-这是用于 Keil/嵌入式 C 工程现场调试的 Windows 上位机监控工具源码和配套文档。它围绕 CAN 变量监控、程序透视、代码旁实时值、离线 C 仿真 worker、监控固件同步和服务器自动更新展开。
+这是用于 Keil/嵌入式 C 工程现场调试的 Windows 上位机源码仓库。当前重点是 CAN 变量监控、程序透视、代码旁实时值、离线 C worker、监控固件同步和服务器自动更新。
 
-同事查找资料时，在 GitHub 搜索：
+同事在 GitHub 搜索：
 
 ```text
 上位机监控
 ```
 
-即可定位到本仓库。
+即可定位本仓库。
 
 ## 目录
 
-- `CanVariableMonitor/`：主 WinForms 上位机源码，当前记录版本为 `V1.79`。
-- `CanVariableMonitor.OfflineCWorker/`：离线 C 仿真 worker 源码。
+- `CanVariableMonitor/`：主 WinForms 上位机源码，当前交付版本从 `V1.0` 重新计数。
+- `CanVariableMonitor.OfflineCWorker/`：离线 C worker 源码。
+- `CanVariableMonitor/WORK_HANDOFF_CURRENT.md`：当前交接说明和注意事项。
 - `can_monitor_agent.c`：控制器侧 CAN 监控固件 agent。
 - `CAN_MONITOR_PROTOCOL.md`：CAN 监控协议说明。
-- `CanVariableMonitor/WORK_HANDOFF_V1.79.md`：V1.66 到 V1.79 的迭代交接记录和经验清单。
-- `CanVariableMonitor/README.md`：主程序早期使用说明。
-- `keil_live_watch.py`：早期 J-Link/Keil 变量监控原型脚本。
-
-## 当前重点能力
-
-- 自动解析 Keil `.map/.axf` 符号，建立变量监控索引。
-- 在线模式下当前代码可见变量优先轮询，避免被 100 个全量变量拖慢。
-- `PEAK / SYS / GC` 作为传输适配器，上层监控策略保持一致。
-- 左侧程序透视与右侧代码区联动，便于现场理解业务函数链路。
-- 右侧 `2 看数值` 同时显示代码和实时值，是唯一主代码窗口。
-- 离线模式尝试通过 TinyCC/offline worker 执行业务层 C 逻辑。
-- 刷新流程包含工程重读、map/axf/bin 检查和监控固件同步。
-- V1.79 加入服务器 `update_manifest.json` + zip 包的自动更新框架。
+- `keil_live_watch.py`：早期 Keil/J-Link 变量监控原型脚本。
 
 ## 构建
 
-需要 Windows、.NET 9 SDK。
+需要 Windows 和 .NET 9 SDK。
 
 ```powershell
 dotnet build ".\CanVariableMonitor\CanVariableMonitor.csproj"
@@ -49,19 +37,25 @@ powershell -ExecutionPolicy Bypass -File ".\CanVariableMonitor\PublishUnified.ps
 
 ## 自动更新
 
-客户端发布目录中放置真实 `update_config.json`，指向服务器的 `update_manifest.json`。服务器放：
+客户端配置读取：
+
+```text
+http://8.148.250.52:9999/update_manifest.json
+```
+
+更新判断规则：服务器版本号和本地版本号只要不一致，就触发更新，不再比较谁大谁小。
+
+服务器根目录只需要放两个文件：
 
 ```text
 update_manifest.json
-上位机监控_Vx.xx_yyyyMMdd_HHmmss.zip
+can_monitor_latest.zip
 ```
 
-详细策略见：
+不要把外层 `server_upload_*.zip`、旧版本备份包、README 或其他说明文件放到服务器根目录。
 
-```text
-CanVariableMonitor/WORK_HANDOFF_V1.79.md
-```
+## 协作规则
 
-## 注意
+本仓库只上传项目源码和安全文档。不要上传任何 Codex 机器配置、登录状态、MCP 配置、SQLite 记忆库、个人 toolkit、`.env` 或本机客户私有配置，避免影响其他电脑登录和使用 Codex。
 
-仓库不上传本地构建产物、发布包、驱动安装包、临时截图、备份文件和客户私有配置。需要给客户交付时，请使用发布脚本生成发布包。
+发布包、临时截图、驱动安装包、构建产物和本地配置已经通过 `.gitignore` 排除。

@@ -20,7 +20,7 @@ namespace CanVariableMonitor;
 
 public sealed partial class MainForm : Form
 {
-	private const string UpperComputerVersion = "V1.81";
+	private const string UpperComputerVersion = "V1.0";
 
 	private const string AppDisplayName = "上位机监控";
 
@@ -34,9 +34,13 @@ public sealed partial class MainForm : Form
 
 	private readonly record struct BatchReadRequest(WatchItem Item, byte Seq, uint Address, int Len, int Offset);
 
-	private sealed record CodeLineRender(int LineNumber, string Code, List<string> Values, bool IsTrueCondition);
+	private sealed record CodeLineRender(int LineNumber, string Code, List<string> Values, bool IsTrueCondition, List<InlineValueSpan> ValueSpans);
 
 	private readonly record struct CodeValueOverlayRow(int X, int Y, string Text, bool Fresh, bool TrueCondition);
+
+	private readonly record struct InlineWatchValuePlacement(WatchItem Item, string Token, int TokenIndex, string Value, bool Fresh);
+
+	private readonly record struct InlineValueSpan(int Start, int Length, bool Fresh);
 
 	private readonly record struct ScintillaValueAnnotationRow(int LineIndex, string Text);
 
@@ -276,6 +280,8 @@ public sealed partial class MainForm : Form
 
 	private CodeValueOverlay _codeValueOverlay;
 
+	private CodeValueOverlayWindow? _codeValueOverlayWindow;
+
 	private Label _dataCodeTitle;
 
 	private Label _visibleValuesLabel;
@@ -326,6 +332,8 @@ public sealed partial class MainForm : Form
 
 	private int _visiblePipelineGoodCycles;
 
+	private int _visibleBatchStartIndex;
+
 	private Dictionary<string, FunctionIndexEntry> _functionIndex = new Dictionary<string, FunctionIndexEntry>(StringComparer.OrdinalIgnoreCase);
 
 	private readonly Dictionary<string, SourceTextCacheEntry> _sourceTextCache = new Dictionary<string, SourceTextCacheEntry>(StringComparer.OrdinalIgnoreCase);
@@ -362,9 +370,13 @@ public sealed partial class MainForm : Form
 
 	private string _lastCodeValueOverlaySignature = "";
 
-	private string _lastScintillaValueMarginSignature = "";
+	private int _codeValueOverlayEmptyRefreshCount;
+
+	private DateTime _lastCodeValueOverlayRowsUtc = DateTime.MinValue;
 
 	private readonly Dictionary<int, string> _scintillaValueEolTextByLine = new Dictionary<int, string>();
+
+	private int _pendingScintillaValueAnnotationRepaint;
 
 	private DateTime _lastDataInlineRenderUtc;
 
@@ -448,6 +460,8 @@ public sealed partial class MainForm : Form
 	private OfflineCWorkerClient? _offlineCWorker;
 
 	private string _offlineCWorkerSignature = "";
+
+	private readonly HashSet<string> _offlineCWorkerCoverageLogged = new HashSet<string>(StringComparer.Ordinal);
 
 	private DateTime _lastOfflineCWorkerLogUtc = DateTime.MinValue;
 
@@ -538,6 +552,7 @@ public sealed partial class MainForm : Form
 	private DateTime _lastPollLoopErrorLogUtc;
 
 	private DateTime _lastScintillaSelectionLeakLogUtc = DateTime.MinValue;
+	private DateTime _lastInlineValueStyleLogUtc = DateTime.MinValue;
 	private DateTime _protectCodeViewportUntilUtc = DateTime.MinValue;
 
 	private DateTime _lastPollPerfLogUtc = DateTime.MinValue;
@@ -668,6 +683,10 @@ public sealed partial class MainForm : Form
 
 	private const int ScintillaIndicatorTrueCondition = 30;
 
+	private const int ScintillaIndicatorValueNormalBorder = 31;
+
+	private const int ScintillaIndicatorValueFreshBorder = 32;
+
 	private const int ScintillaMarkerTrueLine = 8;
 
 	private const int ScintillaMarkerSearchLine = 9;
@@ -723,6 +742,8 @@ public sealed partial class MainForm : Form
 	private Color _codeValueTagActiveForeColor = FixedCodeValueTagForeColor;
 
 	private Color _codeValueTagInactiveForeColor = FixedCodeValueTagForeColor;
+
+	private Color _codeValueTagBorderColor = Color.FromArgb(14, 116, 144);
 
 	private static readonly Color ForceHoldBackColor = Color.FromArgb(245, 158, 11);
 
@@ -961,6 +982,7 @@ public sealed partial class MainForm : Form
 
 	private async Task CheckForApplicationUpdateAsync()
 	{
+		bool updateStartedByUser = false;
 		try
 		{
 			await Task.Delay(1600);
@@ -997,6 +1019,7 @@ public sealed partial class MainForm : Form
 			}
 
 			Log("自动更新：开始下载 " + manifest.Version + "。");
+			updateStartedByUser = true;
 			if (_statusLabel != null)
 			{
 				_statusLabel.Text = "下载更新";
@@ -1025,7 +1048,20 @@ public sealed partial class MainForm : Form
 		}
 		catch (Exception ex)
 		{
-			Log("自动更新检查失败：" + ex.Message);
+			string message = "自动更新失败：" + ex.Message;
+			Log(message);
+			if (updateStartedByUser && IsHandleCreated && !IsDisposed)
+			{
+				BeginInvoke((Action)(() =>
+				{
+					MessageBox.Show(
+						this,
+						message + Environment.NewLine + Environment.NewLine + "请确认服务器根目录同时存在 update_manifest.json 和 can_monitor_latest.zip。",
+						"自动更新失败",
+						MessageBoxButtons.OK,
+						MessageBoxIcon.Warning);
+				}));
+			}
 		}
 		finally
 		{
@@ -1078,6 +1114,9 @@ public sealed partial class MainForm : Form
 		_programInsightRefreshTimer.Dispose();
 		_programGraphDebounceTimer.Stop();
 		_programGraphDebounceTimer.Dispose();
+		_codeValueOverlayWindow?.HideOverlay();
+		_codeValueOverlayWindow?.Dispose();
+		_codeValueOverlayWindow = null;
 		StopPolling(waitForExit: true);
 		_adapter?.Close();
 		_adapter?.Dispose();
@@ -2515,6 +2554,7 @@ public sealed partial class MainForm : Form
 		};
 		codeHost.Controls.Add(_codeEditor);
 		codeHost.Controls.Add(_codeValueOverlay);
+		_codeValueOverlay.BringToFront();
 		layout.Controls.Add(header, 0, 0);
 		layout.Controls.Add(codeHost, 0, 1);
 		panel.Controls.Add(layout);
@@ -2587,16 +2627,17 @@ public sealed partial class MainForm : Form
 		editor.Styles[ScintillaNET.Style.Cpp.String].ForeColor = _codeValueColor;
 		editor.Styles[ScintillaNET.Style.Cpp.StringEol].ForeColor = _codeValueColor;
 		editor.Styles[ScintillaNET.Style.Cpp.Word2].ForeColor = _codeFunctionColor;
+		float inlineValueFontSize = Math.Max(9f, _functionCodeFontSize + 1f);
 		editor.Styles[ScintillaStyleValueFresh].Font = "Consolas";
-		editor.Styles[ScintillaStyleValueFresh].SizeF = Math.Max(9f, _functionCodeFontSize);
+		editor.Styles[ScintillaStyleValueFresh].SizeF = inlineValueFontSize;
 		editor.Styles[ScintillaStyleValueFresh].BackColor = _codeValueTagActiveBackColor;
 		editor.Styles[ScintillaStyleValueFresh].ForeColor = _codeValueTagActiveForeColor;
-		editor.Styles[ScintillaStyleValueFresh].Bold = true;
+		editor.Styles[ScintillaStyleValueFresh].Bold = false;
 		editor.Styles[ScintillaStyleValueStale].Font = "Consolas";
-		editor.Styles[ScintillaStyleValueStale].SizeF = Math.Max(9f, _functionCodeFontSize);
+		editor.Styles[ScintillaStyleValueStale].SizeF = inlineValueFontSize;
 		editor.Styles[ScintillaStyleValueStale].BackColor = _codeValueTagInactiveBackColor;
 		editor.Styles[ScintillaStyleValueStale].ForeColor = _codeValueTagInactiveForeColor;
-		editor.Styles[ScintillaStyleValueStale].Bold = true;
+		editor.Styles[ScintillaStyleValueStale].Bold = false;
 		editor.SetKeywords(0, string.Join(" ", new[]
 		{
 			"auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else", "enum",
@@ -2633,14 +2674,24 @@ public sealed partial class MainForm : Form
 		editor.Indicators[ScintillaIndicatorSearch].Under = true;
 		editor.Indicators[ScintillaIndicatorValueNormal].Style = ScintillaNET.IndicatorStyle.RoundBox;
 		editor.Indicators[ScintillaIndicatorValueNormal].ForeColor = _codeValueTagInactiveBackColor;
-		editor.Indicators[ScintillaIndicatorValueNormal].Alpha = 255;
-		editor.Indicators[ScintillaIndicatorValueNormal].OutlineAlpha = 255;
+		editor.Indicators[ScintillaIndicatorValueNormal].Alpha = 115;
+		editor.Indicators[ScintillaIndicatorValueNormal].OutlineAlpha = 0;
 		editor.Indicators[ScintillaIndicatorValueNormal].Under = true;
 		editor.Indicators[ScintillaIndicatorValueFresh].Style = ScintillaNET.IndicatorStyle.RoundBox;
 		editor.Indicators[ScintillaIndicatorValueFresh].ForeColor = _codeValueTagActiveBackColor;
-		editor.Indicators[ScintillaIndicatorValueFresh].Alpha = 255;
-		editor.Indicators[ScintillaIndicatorValueFresh].OutlineAlpha = 255;
+		editor.Indicators[ScintillaIndicatorValueFresh].Alpha = 115;
+		editor.Indicators[ScintillaIndicatorValueFresh].OutlineAlpha = 0;
 		editor.Indicators[ScintillaIndicatorValueFresh].Under = true;
+		editor.Indicators[ScintillaIndicatorValueNormalBorder].Style = ScintillaNET.IndicatorStyle.StraightBox;
+		editor.Indicators[ScintillaIndicatorValueNormalBorder].ForeColor = _codeValueTagBorderColor;
+		editor.Indicators[ScintillaIndicatorValueNormalBorder].Alpha = 0;
+		editor.Indicators[ScintillaIndicatorValueNormalBorder].OutlineAlpha = 170;
+		editor.Indicators[ScintillaIndicatorValueNormalBorder].Under = true;
+		editor.Indicators[ScintillaIndicatorValueFreshBorder].Style = ScintillaNET.IndicatorStyle.StraightBox;
+		editor.Indicators[ScintillaIndicatorValueFreshBorder].ForeColor = _codeValueTagBorderColor;
+		editor.Indicators[ScintillaIndicatorValueFreshBorder].Alpha = 0;
+		editor.Indicators[ScintillaIndicatorValueFreshBorder].OutlineAlpha = 190;
+		editor.Indicators[ScintillaIndicatorValueFreshBorder].Under = true;
 		editor.Indicators[ScintillaIndicatorValueNormalText].Style = ScintillaNET.IndicatorStyle.TextFore;
 		editor.Indicators[ScintillaIndicatorValueNormalText].ForeColor = _codeValueTagInactiveForeColor;
 		editor.Indicators[ScintillaIndicatorValueNormalText].Under = false;
@@ -5085,8 +5136,14 @@ public sealed partial class MainForm : Form
 			return new PollCycleStats(items.Count, 0, 0, 0, items.Count);
 		}
 
+		int itemCount = items.Count;
+		int rawStartIndex = Volatile.Read(ref _visibleBatchStartIndex);
+		int startIndex = itemCount > 0
+			? ((rawStartIndex % itemCount) + itemCount) % itemCount
+			: 0;
 		int skipped = 0;
 		int sentFrames = 0;
+		bool anyReadAck = false;
 		var states = new Dictionary<WatchItem, BatchReadState>();
 		var queue = new Queue<BatchReadRequest>();
 		var pending = new Dictionary<byte, (BatchReadRequest Request, DateTime Deadline)>();
@@ -5096,8 +5153,9 @@ public sealed partial class MainForm : Form
 			queue.Enqueue(new BatchReadRequest(item, 0, address, len, offset));
 		}
 
-		foreach (WatchItem item in items)
+		for (int i = 0; i < itemCount; i++)
 		{
+			WatchItem item = items[(startIndex + i) % itemCount];
 			if (ShouldDelayPollingItem(item, DateTime.UtcNow))
 			{
 				skipped++;
@@ -5209,6 +5267,7 @@ public sealed partial class MainForm : Form
 
 					BatchReadRequest request = pendingRequest.Request;
 					pending.Remove(seq);
+					anyReadAck = true;
 					NoteCanResponse();
 					if (!states.TryGetValue(request.Item, out BatchReadState? state))
 					{
@@ -5276,7 +5335,14 @@ public sealed partial class MainForm : Form
 			}
 		}
 
-		if (sentFrames > 0 && success == 0 && timeout > 0)
+		if (itemCount > 1 && states.Count > 0)
+		{
+			int completedOrAttempted = Math.Max(1, success + timeout);
+			int nextIndex = (startIndex + completedOrAttempted) % itemCount;
+			Volatile.Write(ref _visibleBatchStartIndex, nextIndex);
+		}
+
+		if (sentFrames > 0 && !anyReadAck && success == 0 && timeout > 0)
 		{
 			NoteCanNoResponse("批量读取变量");
 		}
@@ -5426,6 +5492,7 @@ public sealed partial class MainForm : Form
 			_offlineApplicationSourceDirectory = "";
 			_offlineProgramModel = null;
 			_offlineCWorkerSignature = "";
+			_offlineCWorkerCoverageLogged.Clear();
 		}
 		_offlineCWorker?.Dispose();
 		_offlineCWorker = null;
@@ -5531,8 +5598,9 @@ public sealed partial class MainForm : Form
 			}
 		}
 
-		List<FunctionSourceView> roots = BuildOfflineApplicationSources(directory);
-		List<FunctionSourceView> sources = ExpandOfflineReachableSources(directory, roots, 240);
+		List<FunctionSourceView> roots = BuildOfflineApplicationRootSources(directory);
+		List<FunctionSourceView> sourceSeeds = BuildOfflineApplicationSources(directory);
+		List<FunctionSourceView> sources = ExpandOfflineReachableSources(directory, sourceSeeds, 800);
 		List<WatchItem> bindings = BuildOfflineGlobalBindings(sources);
 		Dictionary<string, WatchItem> aliases = BuildWatchAliasMap(bindings);
 		Dictionary<string, IReadOnlyList<OfflineWriteTrace>> traces = BuildOfflineWriteTraceIndex(sources, aliases);
@@ -5543,7 +5611,8 @@ public sealed partial class MainForm : Form
 			_offlineProgramModel = model;
 		}
 
-		Log($"离线模型：入口 {roots.Count} 个，可达函数 {sources.Count} 个，全局变量 {bindings.Count} 个，写入变量 {traces.Count} 个。");
+		string rootNames = string.Join(", ", roots.Select(root => root.FunctionName).Distinct(StringComparer.OrdinalIgnoreCase));
+		Log($"离线模型：入口 {roots.Count} 个 [{rootNames}]，可达函数 {sources.Count} 个，全局变量 {bindings.Count} 个，写入变量 {traces.Count} 个。");
 		return model;
 	}
 
@@ -5740,7 +5809,17 @@ public sealed partial class MainForm : Form
 		}
 	}
 
+	private List<FunctionSourceView> BuildOfflineApplicationRootSources(string directory)
+	{
+		return BuildOfflineApplicationSources(directory, includeAnalysisSeeds: false);
+	}
+
 	private List<FunctionSourceView> BuildOfflineApplicationSources(string directory)
+	{
+		return BuildOfflineApplicationSources(directory, includeAnalysisSeeds: true);
+	}
+
+	private List<FunctionSourceView> BuildOfflineApplicationSources(string directory, bool includeAnalysisSeeds)
 	{
 		var sources = new List<FunctionSourceView>();
 		var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -5782,18 +5861,29 @@ public sealed partial class MainForm : Form
 			}
 		}
 
+		foreach (string name in FindOfflineDisplayTaskEntries(directory))
+		{
+			if (TryAdd(name))
+			{
+				primaryCount++;
+			}
+		}
+
 		ProgramGraphSnapshot? snapshot = _programGraphSnapshot;
 		if (snapshot != null && snapshot.Success)
 		{
 			ProgramCallGraphNode? controlRoot = FindControlBusinessRoot(snapshot.CallGraphNodes);
-			if (controlRoot != null)
+			if (controlRoot != null && (includeAnalysisSeeds || primaryCount == 0))
 			{
 				TryAdd(controlRoot.Name);
 			}
 
-			foreach (ProgramCallGraphNode displayRoot in FindDisplayRoots(snapshot.CallGraphNodes).Take(16))
+			if (includeAnalysisSeeds || primaryCount == 0)
 			{
-				TryAdd(displayRoot.Name);
+				foreach (ProgramCallGraphNode displayRoot in FindDisplayRoots(snapshot.CallGraphNodes).Take(16))
+				{
+					TryAdd(displayRoot.Name);
+				}
 			}
 
 			if (primaryCount == 0)
@@ -5821,19 +5911,17 @@ public sealed partial class MainForm : Form
 				}
 			}
 
-			foreach (ProgramFunctionInfo function in snapshot.HotFunctions.Take(12))
+			if (includeAnalysisSeeds)
 			{
-				TryAdd(function.Name);
-				if (sources.Count >= 24)
+				foreach (ProgramFunctionInfo function in snapshot.HotFunctions.Take(12))
 				{
-					break;
+					TryAdd(function.Name);
+					if (sources.Count >= 24)
+					{
+						break;
+					}
 				}
 			}
-		}
-
-		foreach (string name in FindOfflineDisplayTaskEntries(directory))
-		{
-			TryAdd(name);
 		}
 
 		return sources;
@@ -5905,6 +5993,7 @@ public sealed partial class MainForm : Form
 		if (shouldExecute && _offlineCWorker != null)
 		{
 			OfflineWorkerResult run = _offlineCWorker.RunTick();
+			LogOfflineWorkerCoverage(run);
 			ran = run.Ok && run.EngineAvailable;
 			if (!ran)
 			{
@@ -5961,6 +6050,7 @@ public sealed partial class MainForm : Form
 
 		OfflineWorkerProjectPayload payload = BuildOfflineCWorkerProjectPayload(model, simulationItems, signature);
 		OfflineWorkerResult result = _offlineCWorker.InitProject(payload);
+		LogOfflineWorkerCoverage(result);
 		if (!result.Ok || !result.EngineAvailable)
 		{
 			_offlineCWorkerSignature = "";
@@ -5985,6 +6075,7 @@ public sealed partial class MainForm : Form
 			.Select(BuildOfflineWorkerVariablePayload)
 			.ToList();
 		OfflineWorkerResult result = _offlineCWorker.ReadSnapshot(variables);
+		LogOfflineWorkerCoverage(result);
 		if (!result.Ok)
 		{
 			LogOfflineCWorkerIssue(result.Status.Length > 0 ? result.Status : "离线 C worker 快照读取失败。");
@@ -6068,7 +6159,12 @@ public sealed partial class MainForm : Form
 		// The worker owns the whole application-level model. Visible watch variables can change
 		// while the user scrolls, so they must not force TinyCC to rebuild every polling cycle.
 		int modelVariableCount = model.Bindings.Count(item => item.Enabled && !item.IsChild);
-		return model.Signature + "|modelVars=" + modelVariableCount.ToString(CultureInfo.InvariantCulture);
+		string roots = string.Join(",", model.Roots
+			.Select(root => root.FunctionName)
+			.Where(name => !string.IsNullOrWhiteSpace(name))
+			.Distinct(StringComparer.OrdinalIgnoreCase)
+			.OrderBy(name => name, StringComparer.OrdinalIgnoreCase));
+		return model.Signature + "|roots=" + roots + "|modelVars=" + modelVariableCount.ToString(CultureInfo.InvariantCulture);
 	}
 
 	private static bool IsValidOfflineWorkerAlias(string alias)
@@ -6097,6 +6193,43 @@ public sealed partial class MainForm : Form
 		_lastOfflineCWorkerLogUtc = now;
 		_lastOfflineCWorkerLogMessage = message;
 		Log(message);
+	}
+
+	private void LogOfflineWorkerCoverage(OfflineWorkerResult result)
+	{
+		if (result.Coverage.Count == 0)
+		{
+			return;
+		}
+
+		foreach (string rawMessage in result.Coverage)
+		{
+			string message = rawMessage.Trim();
+			if (message.Length == 0)
+			{
+				continue;
+			}
+
+			bool important =
+				message.StartsWith("离线覆盖：入口", StringComparison.Ordinal) ||
+				message.StartsWith("离线未覆盖：", StringComparison.Ordinal) ||
+				message.Contains("stub", StringComparison.OrdinalIgnoreCase) ||
+				message.Contains("TinyCC", StringComparison.OrdinalIgnoreCase);
+			if (!important)
+			{
+				continue;
+			}
+
+			lock (_simulationLock)
+			{
+				if (!_offlineCWorkerCoverageLogged.Add(message))
+				{
+					continue;
+				}
+			}
+
+			Log(message);
+		}
 	}
 
 	private bool RunOfflineLightSimulationTick(IReadOnlyList<WatchItem> watchItems, bool force = false)
@@ -9897,7 +10030,6 @@ public sealed partial class MainForm : Form
 			RenderFunctionAnalysis(force: true);
 			UpdateProgramInsightPanel(force: true);
 			RefreshProgramTreeFromSnapshot();
-			RefreshScintillaVisibleRuntimeValues(force: true);
 			if (restoreSnapshot.HasValue)
 			{
 				ApplyCodeViewSnapshotViewport(restoreSnapshot.Value, "deferred-function-values");
@@ -10102,7 +10234,6 @@ public sealed partial class MainForm : Form
 		}
 
 		_nextInlineValueFadeUtc = null;
-		_lastScintillaValueMarginSignature = "";
 		_lastCodeValueOverlaySignature = "";
 		HideCodeValueOverlay();
 		ClearScintillaValueDecorations();
@@ -10126,7 +10257,6 @@ public sealed partial class MainForm : Form
 	private void MarkCodeValueRenderStateChanged()
 	{
 		_nextInlineValueFadeUtc = null;
-		_lastScintillaValueMarginSignature = "";
 		_lastCodeValueOverlaySignature = "";
 		_lastFunctionCodeText = "";
 		_lastDataCodeText = "";
@@ -10678,7 +10808,7 @@ public sealed partial class MainForm : Form
 			return;
 		}
 
-		string key = "caret:" + containingFunction;
+		string key = containingFunction.Trim();
 		if (key.Equals(_lastProgramTreeHoverKey, StringComparison.OrdinalIgnoreCase))
 		{
 			return;
@@ -10699,17 +10829,11 @@ public sealed partial class MainForm : Form
 			(focusFunction.Equals(_programTreeFocusedFunction, StringComparison.OrdinalIgnoreCase) &&
 			 locateTargetFunction.Equals(_programTreeLocateTargetFunction, StringComparison.OrdinalIgnoreCase)))
 		{
-			if (scrollIntoView)
+			if (scrollIntoView && allowStructureRefresh)
 			{
 				string scrollTarget = focusFunction;
-				bool expandedPath = allowStructureRefresh && ExpandProgramTreePathToFunction(scrollTarget);
-				if (_flowChart != null && !_flowChart.CenterFunctionInView(scrollTarget) && allowStructureRefresh)
-				{
-					RefreshProgramTreeFromSnapshot();
-					_flowChart.SetFocusedFunction(focusFunction);
-					_flowChart.CenterFunctionInView(scrollTarget);
-				}
-				else if (expandedPath)
+				bool expandedPath = ExpandProgramTreePathToFunction(scrollTarget);
+				if (expandedPath)
 				{
 					RefreshProgramTreeFromSnapshot();
 					_flowChart?.SetFocusedFunction(focusFunction);
@@ -11588,7 +11712,6 @@ public sealed partial class MainForm : Form
 			if (_codeEditor != null && !_codeEditor.IsDisposed)
 			{
 				ApplyProgramSearchHighlight();
-				RefreshScintillaVisibleRuntimeValues(force: true);
 			}
 			else
 			{
@@ -11625,7 +11748,6 @@ public sealed partial class MainForm : Form
 			if (_codeEditor != null && !_codeEditor.IsDisposed)
 			{
 				ApplyProgramSearchHighlight();
-				RefreshScintillaVisibleRuntimeValues(force: true);
 			}
 			else
 			{
@@ -12449,7 +12571,7 @@ public sealed partial class MainForm : Form
 				includeValues: true,
 				out _,
 				null,
-				inlineValuesInText: false);
+				inlineValuesInText: ShouldShowInlineCodeValues());
 			ApplyScintillaRuntimeHighlights(renderedLines, renderSource);
 			return;
 		}
@@ -13110,10 +13232,6 @@ public sealed partial class MainForm : Form
 			_forceDataCodeRtfRefresh = false;
 		}
 		RenderFunctionSourceToBox(_functionCodeBox, renderValues, ref _lastFunctionCodeText, resetScroll, applySearchHighlight: true);
-		if (renderValues && ReferenceEquals(_functionCodeBox, _dataCodeBox))
-		{
-			RefreshScintillaVisibleRuntimeValues(force: true);
-		}
 		if (renderValues && !ReferenceEquals(_functionCodeBox, _dataCodeBox))
 		{
 			RenderDataFunctionMirror(resetScroll);
@@ -13171,7 +13289,7 @@ public sealed partial class MainForm : Form
 		_lastDataInlineRenderUtc = DateTime.UtcNow;
 		if (renderValues)
 		{
-			RefreshScintillaVisibleRuntimeValues(force: true);
+			HideCodeValueOverlay();
 		}
 		else
 		{
@@ -13196,10 +13314,17 @@ public sealed partial class MainForm : Form
 	private void HideCodeValueOverlay()
 	{
 		_lastCodeValueOverlaySignature = "";
+		_codeValueOverlayEmptyRefreshCount = 0;
+		_lastCodeValueOverlayRowsUtc = DateTime.MinValue;
 		if (_codeValueOverlay != null)
 		{
+			if (_codeValueOverlay.Visible)
+			{
+				_codeValueOverlay.Parent?.Invalidate(_codeValueOverlay.Bounds, true);
+			}
 			_codeValueOverlay.Visible = false;
 		}
+		_codeValueOverlayWindow?.HideOverlay();
 		ClearScintillaValueAnnotations();
 	}
 
@@ -13218,6 +13343,11 @@ public sealed partial class MainForm : Form
 			return;
 		}
 
+		if (_scintillaValueEolTextByLine.Count > 0)
+		{
+			ClearScintillaValueAnnotations();
+		}
+
 		FunctionSourceView? source = GetCodeViewSource();
 		if (source == null || source.Lines.Count == 0)
 		{
@@ -13226,7 +13356,11 @@ public sealed partial class MainForm : Form
 		}
 		(int Start, int End) visibleRange = GetVisibleSourceLineRange(DataMirrorPaddingLines);
 		List<WatchItem> candidates = GetInlineWatchCandidates(visibleRange);
-		var annotationRows = new List<ScintillaValueAnnotationRow>();
+		var overlayRows = new List<CodeValueOverlayRow>();
+		var occupiedByLine = new Dictionary<int, List<Rectangle>>();
+		Font valueFont = _codeValueOverlayWindow?.Font ?? _codeValueOverlay?.Font ?? _codeEditor.Font;
+		int rowHeight = Math.Max(16, _codeEditor.Lines[0].Height);
+		int overlayWidth = _codeEditor.ClientSize.Width;
 		int first = Math.Max(visibleRange.Start, source.StartLine);
 		int last = Math.Min(visibleRange.End, GetSourceEndLine(source));
 		for (int absoluteLine = first; absoluteLine <= last; absoluteLine++)
@@ -13237,8 +13371,8 @@ public sealed partial class MainForm : Form
 				continue;
 			}
 
-			List<string> values = BuildInlineWatchValues(source.Lines[lineIndex], candidates);
-			if (values.Count == 0)
+			IReadOnlyList<InlineWatchValuePlacement> placements = BuildInlineWatchValuePlacements(source.Lines[lineIndex], candidates);
+			if (placements.Count == 0)
 			{
 				continue;
 			}
@@ -13248,37 +13382,217 @@ public sealed partial class MainForm : Form
 				continue;
 			}
 
-			string tagText = BuildCompactCodeValueTag(values);
-			if (tagText.Length == 0)
+			if (!occupiedByLine.TryGetValue(lineIndex, out List<Rectangle>? occupied))
 			{
-				continue;
+				occupied = new List<Rectangle>();
+				occupiedByLine[lineIndex] = occupied;
 			}
 
-			annotationRows.Add(new ScintillaValueAnnotationRow(lineIndex, tagText));
+			foreach (InlineWatchValuePlacement placement in placements)
+			{
+				Size textSize = TextRenderer.MeasureText(
+					placement.Value,
+					valueFont,
+					new Size(10000, rowHeight),
+					TextFormatFlags.SingleLine | TextFormatFlags.NoPadding | TextFormatFlags.NoClipping);
+				int width = Math.Max(8, textSize.Width);
+
+				if (!TryGetInlineValueOverlayPoint(
+					lineIndex,
+					source.Lines[lineIndex],
+					placement,
+					width,
+					overlayWidth,
+					rowHeight,
+					out Point valuePoint))
+				{
+					continue;
+				}
+
+				var rect = new Rectangle(valuePoint.X - Ui(2), valuePoint.Y + 1, width + Ui(4), Math.Max(14, rowHeight - 2));
+				if (occupied.Any(existing => existing.IntersectsWith(rect)))
+				{
+					continue;
+				}
+
+				occupied.Add(rect);
+				overlayRows.Add(new CodeValueOverlayRow(valuePoint.X, valuePoint.Y, placement.Value, placement.Fresh, false));
+			}
 		}
 
 		string signature = $"{visibleRange.Start}:{visibleRange.End}:{_codeEditor.FirstVisibleLine}:{_codeEditor.XOffset}|" +
-			string.Join("|", annotationRows.Select(row => $"{row.LineIndex}:{row.Text}")) +
+			string.Join("|", overlayRows.Select(row => $"{row.X}:{row.Y}:{row.Text}")) +
 			$"|{_themeName}|{_functionCodeFontSize:0.0}";
-		if (signature.Equals(_lastCodeValueOverlaySignature, StringComparison.Ordinal) && !force)
+		bool emptyRowsWhileVisible = overlayRows.Count == 0 && _codeValueOverlayWindow != null && _codeValueOverlayWindow.Visible;
+		if (signature.Equals(_lastCodeValueOverlaySignature, StringComparison.Ordinal) && !force && !emptyRowsWhileVisible)
 		{
 			return;
 		}
 
 		_lastCodeValueOverlaySignature = signature;
-		ApplyScintillaValueAnnotations(annotationRows);
-		if (_codeValueOverlay != null && _codeValueOverlay.Visible)
+		if (_codeValueOverlay == null)
 		{
-			_codeValueOverlay.Visible = false;
+			return;
 		}
+
+		if (overlayRows.Count == 0)
+		{
+			_codeValueOverlayEmptyRefreshCount++;
+			bool recentRows = (DateTime.UtcNow - _lastCodeValueOverlayRowsUtc).TotalMilliseconds < 1200;
+			bool wheelActive = (DateTime.UtcNow - _lastUiWheelUtc).TotalMilliseconds < Math.Max(VisibleDataScrollDebounceMs * 3, 360);
+			if (_codeValueOverlayWindow != null && _codeValueOverlayWindow.Visible && (_codeValueOverlayEmptyRefreshCount < 3 || recentRows || wheelActive))
+			{
+				_lastCodeValueOverlaySignature = signature;
+				return;
+			}
+
+			if (_codeValueOverlay.Visible)
+			{
+				_codeValueOverlay.Parent?.Invalidate(_codeValueOverlay.Bounds, true);
+			}
+			_codeValueOverlay.Visible = false;
+			_codeValueOverlayWindow?.HideOverlay();
+			return;
+		}
+
+		_codeValueOverlayEmptyRefreshCount = 0;
+		_lastCodeValueOverlayRowsUtc = DateTime.UtcNow;
+		Color valueFore = PickCodeValueOverlayForeColor();
+		_codeValueOverlay.Font = new Font("Consolas", Math.Max(8.5f, _functionCodeFontSize - 0.35f), FontStyle.Regular);
+		_codeValueOverlay.Visible = false;
+		_codeValueOverlayWindow ??= new CodeValueOverlayWindow();
+		_codeValueOverlayWindow.Font = _codeValueOverlay.Font;
+		Rectangle editorBounds = new Rectangle(_codeEditor.PointToScreen(Point.Empty), _codeEditor.ClientSize);
+		_codeValueOverlayWindow.ShowRows(
+			this,
+			editorBounds,
+			overlayRows,
+			_codeEditor.BackColor,
+			valueFore,
+			rowHeight);
 	}
 
 	private bool ShouldShowCodeValueOverlay()
 	{
-		return ShouldShowInlineCodeValues();
+		return false;
 	}
 
-	private void ApplyScintillaValueAnnotations(IReadOnlyList<ScintillaValueAnnotationRow> rows)
+	private bool TryGetInlineValueOverlayPoint(
+		int lineIndex,
+		string lineText,
+		InlineWatchValuePlacement placement,
+		int valueWidth,
+		int overlayWidth,
+		int rowHeight,
+		out Point point)
+	{
+		point = Point.Empty;
+		if (_codeEditor == null || _codeEditor.IsDisposed ||
+			lineIndex < 0 || lineIndex >= _codeEditor.Lines.Count)
+		{
+			return false;
+		}
+
+		int tokenEndIndex = Math.Clamp(placement.TokenIndex + placement.Token.Length, 0, lineText.Length);
+		int afterTokenPosition = GetScintillaLinePositionFromCharIndex(lineIndex, lineText, tokenEndIndex);
+		int y = _codeEditor.PointYFromPosition(afterTokenPosition);
+		if (y + rowHeight < 0 || y > _codeEditor.ClientSize.Height)
+		{
+			return false;
+		}
+
+		int desiredPadding = Ui(7);
+		int safeRight = overlayWidth - Ui(8);
+		int nextCodeIndex = FindNextNonWhiteSpaceIndex(lineText, tokenEndIndex);
+		if (nextCodeIndex > tokenEndIndex)
+		{
+			int gapStartX = _codeEditor.PointXFromPosition(afterTokenPosition) + desiredPadding;
+			int nextCodeX = _codeEditor.PointXFromPosition(GetScintillaLinePositionFromCharIndex(lineIndex, lineText, nextCodeIndex));
+			if (gapStartX >= 0 && gapStartX + valueWidth <= nextCodeX - Ui(4) && gapStartX + valueWidth <= safeRight)
+			{
+				point = new Point(gapStartX, y);
+				return true;
+			}
+		}
+
+		int codeEndIndex = GetCodeVisualEndIndex(lineText);
+		int endPosition = GetScintillaLinePositionFromCharIndex(lineIndex, lineText, codeEndIndex);
+		int endX = _codeEditor.PointXFromPosition(endPosition);
+		int x = endX + Ui(14);
+		if (x >= 0 && x + valueWidth <= safeRight)
+		{
+			point = new Point(x, y);
+			return true;
+		}
+
+		return false;
+	}
+
+	private static int FindNextNonWhiteSpaceIndex(string lineText, int startIndex)
+	{
+		for (int i = Math.Clamp(startIndex, 0, lineText.Length); i < lineText.Length; i++)
+		{
+			if (!char.IsWhiteSpace(lineText[i]))
+			{
+				return i;
+			}
+		}
+
+		return lineText.Length;
+	}
+
+	private static int GetCodeVisualEndIndex(string lineText)
+	{
+		int end = lineText.Length;
+		while (end > 0 && (lineText[end - 1] == '\r' || lineText[end - 1] == '\n' || char.IsWhiteSpace(lineText[end - 1])))
+		{
+			end--;
+		}
+
+		return end;
+	}
+
+	private int GetScintillaLinePositionFromCharIndex(int lineIndex, string lineText, int charIndex)
+	{
+		if (_codeEditor == null || _codeEditor.IsDisposed ||
+			lineIndex < 0 || lineIndex >= _codeEditor.Lines.Count)
+		{
+			return 0;
+		}
+
+		int safeCharIndex = Math.Clamp(charIndex, 0, lineText.Length);
+		int byteOffset = Encoding.UTF8.GetByteCount(lineText.Substring(0, safeCharIndex));
+		int position = _codeEditor.Lines[lineIndex].Position + byteOffset;
+		return Math.Clamp(position, 0, _codeEditor.TextLength);
+	}
+
+	private Color PickCodeValueOverlayForeColor()
+	{
+		Color[] candidates =
+		{
+			Color.FromArgb(185, 28, 28),
+			Color.FromArgb(194, 65, 12),
+			Color.FromArgb(161, 98, 7),
+			Color.FromArgb(162, 28, 175),
+			Color.FromArgb(14, 116, 144),
+			Color.FromArgb(234, 179, 8),
+			Color.FromArgb(34, 211, 238),
+			Color.FromArgb(253, 224, 71)
+		};
+
+		return candidates
+			.OrderByDescending(color =>
+			{
+				double contrast = ContrastRatio(color, _surface);
+				int codeDistance = Math.Min(
+					Math.Min(ColorDistance(color, _ink), ColorDistance(color, _codeCommentColor)),
+					Math.Min(ColorDistance(color, _codeKeywordColor), ColorDistance(color, _codeFunctionColor)));
+				return contrast * 100.0 + codeDistance;
+			})
+			.First();
+	}
+
+	private void ApplyScintillaValueAnnotations(IReadOnlyList<ScintillaValueAnnotationRow> rows, bool force = false)
 	{
 		if (_codeEditor == null || _codeEditor.IsDisposed)
 		{
@@ -13309,7 +13623,8 @@ public sealed partial class MainForm : Form
 
 		foreach (KeyValuePair<int, string> pair in eolDesired)
 		{
-			if (_scintillaValueEolTextByLine.TryGetValue(pair.Key, out string? oldText) &&
+			if (!force &&
+				_scintillaValueEolTextByLine.TryGetValue(pair.Key, out string? oldText) &&
 				oldText.Equals(pair.Value, StringComparison.Ordinal))
 			{
 				continue;
@@ -13321,6 +13636,62 @@ public sealed partial class MainForm : Form
 
 		_codeEditor.AnnotationVisible = ScintillaNET.Annotation.Hidden;
 		SetScintillaEolAnnotationVisible(eolDesired.Count > 0);
+		RequestScintillaValueAnnotationRepaint();
+	}
+
+	private void RequestScintillaValueAnnotationRepaint()
+	{
+		if (_codeEditor == null || _codeEditor.IsDisposed || !IsHandleCreated)
+		{
+			return;
+		}
+
+		if (Interlocked.Exchange(ref _pendingScintillaValueAnnotationRepaint, 1) != 0)
+		{
+			return;
+		}
+
+		try
+		{
+			BeginInvoke(new Action(async () =>
+			{
+				try
+				{
+					await Task.Delay(35).ConfigureAwait(true);
+					ReapplyScintillaValueAnnotationsForPaint();
+				}
+				finally
+				{
+					Interlocked.Exchange(ref _pendingScintillaValueAnnotationRepaint, 0);
+				}
+			}));
+		}
+		catch
+		{
+			Interlocked.Exchange(ref _pendingScintillaValueAnnotationRepaint, 0);
+		}
+	}
+
+	private void ReapplyScintillaValueAnnotationsForPaint()
+	{
+		if (_codeEditor == null || _codeEditor.IsDisposed || !_codeEditor.IsHandleCreated)
+		{
+			return;
+		}
+
+		foreach (KeyValuePair<int, string> pair in _scintillaValueEolTextByLine.ToList())
+		{
+			if (pair.Key < 0 || pair.Key >= _codeEditor.Lines.Count)
+			{
+				continue;
+			}
+
+			SetScintillaEolAnnotation(pair.Key, pair.Value, ScintillaStyleValueStale);
+		}
+
+		SetScintillaEolAnnotationVisible(_scintillaValueEolTextByLine.Count > 0);
+		_codeEditor.Invalidate();
+		_codeEditor.Update();
 	}
 
 	private void ClearScintillaValueAnnotations()
@@ -13405,13 +13776,23 @@ public sealed partial class MainForm : Form
 			return "";
 		}
 
-		var shown = values.Take(4).ToList();
-		string text = "//值:【" + string.Join("，", shown);
-		if (values.Count > shown.Count)
+		return string.Join("  ", values.Take(4).Select(ExtractPureInlineValueText));
+	}
+
+	private static string ExtractPureInlineValueText(string text)
+	{
+		if (string.IsNullOrWhiteSpace(text))
 		{
-			text += "，+" + (values.Count - shown.Count).ToString(CultureInfo.InvariantCulture);
+			return "";
 		}
-		return text + "】";
+
+		int equalsIndex = text.IndexOf('=');
+		if (equalsIndex >= 0 && equalsIndex + 1 < text.Length)
+		{
+			return NormalizeInlineRenderedValue(text.Substring(equalsIndex + 1));
+		}
+
+		return NormalizeInlineRenderedValue(text);
 	}
 
 	private bool LineHasFreshWatch(string line, IReadOnlyList<WatchItem> candidates)
@@ -15714,14 +16095,21 @@ public sealed partial class MainForm : Form
 		bool addedWatch = AutoWatchVariablesForVisibleRange(visibleRange);
 		CapturePollPriorityForVisibleRange(visibleRange);
 		UpdateVisibleValuesLabel(visibleRange);
-		UpdateProgramInsightPanel();
 		string rangeSignature = BuildVisibleRangeSignature(visibleRange);
 		string conditionSignature = BuildVisibleConditionSignature(visibleRange);
 		bool rangeChanged = !rangeSignature.Equals(_lastVisibleRangeSignature, StringComparison.Ordinal);
 		bool conditionChanged = !conditionSignature.Equals(_lastVisibleConditionSignature, StringComparison.Ordinal);
 		_lastVisibleRangeSignature = rangeSignature;
 		_lastVisibleConditionSignature = conditionSignature;
-		RefreshScintillaVisibleRuntimeValues(force: true);
+		if (ShouldShowInlineCodeValues())
+		{
+			_functionCodeDirty = true;
+			_dataCodeDirty = ReferenceEquals(_functionCodeBox, _dataCodeBox);
+		}
+		else
+		{
+			RefreshScintillaVisibleRuntimeValues(force: true);
+		}
 		if (rangeChanged || conditionChanged || addedWatch)
 		{
 			UpdateProgramInsightPanel();
@@ -16380,10 +16768,17 @@ public sealed partial class MainForm : Form
 			includeValues,
 			out string nextText,
 			lineRange,
-			inlineValuesInText: false,
+			inlineValuesInText: includeValues,
 			includeLineNumbersInText: false);
 		int firstVisibleLine = _codeEditor.FirstVisibleLine;
 		int currentPosition = Math.Clamp(_codeEditor.CurrentPosition, 0, Math.Max(0, _codeEditor.TextLength));
+		int selectionStart = Math.Clamp(_codeEditor.SelectionStart, 0, Math.Max(0, _codeEditor.TextLength));
+		int selectionEnd = Math.Clamp(_codeEditor.SelectionEnd, 0, Math.Max(0, _codeEditor.TextLength));
+		bool preserveUserSelection = !resetScroll &&
+			_codeEditor.Focused &&
+			selectionStart != selectionEnd &&
+			!AreCodeInteractionSideEffectsSuppressed() &&
+			!IsCodeViewportProtected();
 		if (!nextText.Equals(lastText, StringComparison.Ordinal))
 		{
 			lastText = nextText;
@@ -16394,7 +16789,6 @@ public sealed partial class MainForm : Form
 				_codeEditor.Text = nextText;
 				_functionCodeBox.Text = nextText;
 				_codeEditor.Margins.ClearAllText();
-				_lastScintillaValueMarginSignature = "";
 				_lastCodeValueOverlaySignature = "";
 				_codeEditor.EmptyUndoBuffer();
 				_codeEditor.SetSavePoint();
@@ -16412,7 +16806,7 @@ public sealed partial class MainForm : Form
 		if (includeValues)
 		{
 			ApplyScintillaRuntimeHighlights(renderedLines, renderSource);
-			UpdateCodeValueOverlay(force: true);
+			HideCodeValueOverlay();
 		}
 		else if (_codeValueOverlay != null)
 		{
@@ -16427,13 +16821,23 @@ public sealed partial class MainForm : Form
 			_codeEditor.FirstVisibleLine = 0;
 			_codeEditor.XOffset = 0;
 		}
+		else if (preserveUserSelection && _codeEditor.TextLength > 0)
+		{
+			int safeStart = Math.Clamp(selectionStart, 0, _codeEditor.TextLength);
+			int safeEnd = Math.Clamp(selectionEnd, 0, _codeEditor.TextLength);
+			_codeEditor.SetSelection(safeEnd, safeStart);
+			_codeEditor.FirstVisibleLine = Math.Clamp(firstVisibleLine, 0, Math.Max(0, _codeEditor.Lines.Count - 1));
+		}
 		else if (_codeEditor.TextLength > 0)
 		{
 			int restoredPosition = Math.Clamp(currentPosition, 0, _codeEditor.TextLength);
 			CollapseScintillaSelection(restoredPosition, "render-restore-position");
 			_codeEditor.FirstVisibleLine = Math.Clamp(firstVisibleLine, 0, Math.Max(0, _codeEditor.Lines.Count - 1));
 		}
-		CollapseScintillaSelection(_codeEditor.CurrentPosition, "render-final");
+		if (!preserveUserSelection)
+		{
+			CollapseScintillaSelection(_codeEditor.CurrentPosition, "render-final");
+		}
 		_lastScintillaScopeCaret = -1;
 		UpdateScintillaScopeHighlight(force: true);
 
@@ -16456,6 +16860,10 @@ public sealed partial class MainForm : Form
 		_codeEditor.IndicatorCurrent = ScintillaIndicatorValueNormal;
 		_codeEditor.IndicatorClearRange(0, _codeEditor.TextLength);
 		_codeEditor.IndicatorCurrent = ScintillaIndicatorValueFresh;
+		_codeEditor.IndicatorClearRange(0, _codeEditor.TextLength);
+		_codeEditor.IndicatorCurrent = ScintillaIndicatorValueNormalBorder;
+		_codeEditor.IndicatorClearRange(0, _codeEditor.TextLength);
+		_codeEditor.IndicatorCurrent = ScintillaIndicatorValueFreshBorder;
 		_codeEditor.IndicatorClearRange(0, _codeEditor.TextLength);
 		_codeEditor.IndicatorCurrent = ScintillaIndicatorValueNormalText;
 		_codeEditor.IndicatorClearRange(0, _codeEditor.TextLength);
@@ -16480,8 +16888,78 @@ public sealed partial class MainForm : Form
 				_codeEditor.Lines[i].MarkerAdd(ScintillaMarkerSearchLine);
 			}
 
+			ApplyScintillaInlineValueSpans(i, renderedLine);
 			HighlightScintillaTokenInLine(i, _focusedVariableName, ScintillaIndicatorFocus);
 			HighlightScintillaTokenInLine(i, _activeProgramSearchKeyword, ScintillaIndicatorSearch);
+		}
+	}
+
+	private void ApplyScintillaInlineValueSpans(int lineIndex, CodeLineRender renderedLine)
+	{
+		if (_codeEditor == null || _codeEditor.IsDisposed ||
+			renderedLine.ValueSpans.Count == 0 ||
+			lineIndex < 0 || lineIndex >= _codeEditor.Lines.Count)
+		{
+			return;
+		}
+
+		foreach (InlineValueSpan span in renderedLine.ValueSpans)
+		{
+			if (span.Start < 0 || span.Length <= 0 || span.Start >= renderedLine.Code.Length)
+			{
+				continue;
+			}
+
+			int safeLength = Math.Min(span.Length, renderedLine.Code.Length - span.Start);
+			if (safeLength <= 0)
+			{
+				continue;
+			}
+
+			int start = GetScintillaLinePositionFromCharIndex(lineIndex, renderedLine.Code, span.Start);
+			int length = Encoding.UTF8.GetByteCount(renderedLine.Code.Substring(span.Start, safeLength));
+			if (length <= 0)
+			{
+				continue;
+			}
+
+			_codeEditor.IndicatorCurrent = span.Fresh ? ScintillaIndicatorValueFresh : ScintillaIndicatorValueNormal;
+			_codeEditor.IndicatorFillRange(start, Math.Min(length, Math.Max(0, _codeEditor.TextLength - start)));
+			_codeEditor.IndicatorCurrent = span.Fresh ? ScintillaIndicatorValueFreshBorder : ScintillaIndicatorValueNormalBorder;
+			_codeEditor.IndicatorFillRange(start, Math.Min(length, Math.Max(0, _codeEditor.TextLength - start)));
+			_codeEditor.IndicatorCurrent = span.Fresh ? ScintillaIndicatorValueFreshText : ScintillaIndicatorValueNormalText;
+			_codeEditor.IndicatorFillRange(start, Math.Min(length, Math.Max(0, _codeEditor.TextLength - start)));
+			ApplyScintillaInlineValueTextStyle(start, length, span.Fresh);
+		}
+	}
+
+	private void ApplyScintillaInlineValueTextStyle(int start, int length, bool fresh)
+	{
+		if (_codeEditor == null || _codeEditor.IsDisposed ||
+			start < 0 || length <= 0 || start >= _codeEditor.TextLength)
+		{
+			return;
+		}
+
+		int safeLength = Math.Min(length, _codeEditor.TextLength - start);
+		if (safeLength <= 0)
+		{
+			return;
+		}
+
+		try
+		{
+			_codeEditor.StartStyling(start);
+			_codeEditor.SetStyling(safeLength, fresh ? ScintillaStyleValueFresh : ScintillaStyleValueStale);
+		}
+		catch (Exception ex)
+		{
+			DateTime now = DateTime.UtcNow;
+			if ((now - _lastInlineValueStyleLogUtc).TotalSeconds >= 30)
+			{
+				_lastInlineValueStyleLogUtc = now;
+				Log("数值样式刷新失败：" + ex.Message);
+			}
 		}
 	}
 
@@ -16495,6 +16973,10 @@ public sealed partial class MainForm : Form
 		_codeEditor.IndicatorCurrent = ScintillaIndicatorValueNormal;
 		_codeEditor.IndicatorClearRange(0, _codeEditor.TextLength);
 		_codeEditor.IndicatorCurrent = ScintillaIndicatorValueFresh;
+		_codeEditor.IndicatorClearRange(0, _codeEditor.TextLength);
+		_codeEditor.IndicatorCurrent = ScintillaIndicatorValueNormalBorder;
+		_codeEditor.IndicatorClearRange(0, _codeEditor.TextLength);
+		_codeEditor.IndicatorCurrent = ScintillaIndicatorValueFreshBorder;
 		_codeEditor.IndicatorClearRange(0, _codeEditor.TextLength);
 		_codeEditor.IndicatorCurrent = ScintillaIndicatorValueNormalText;
 		_codeEditor.IndicatorClearRange(0, _codeEditor.TextLength);
@@ -16514,12 +16996,11 @@ public sealed partial class MainForm : Form
 			return;
 		}
 
+		HideCodeValueOverlay();
 		if (!ShouldShowInlineCodeValues())
 		{
 			ClearScintillaValueDecorations();
-			HideCodeValueOverlay();
 			_nextInlineValueFadeUtc = null;
-			_lastScintillaValueMarginSignature = "";
 			RefreshScintillaVisibleConditionHighlights(force: true);
 			return;
 		}
@@ -16530,62 +17011,16 @@ public sealed partial class MainForm : Form
 			return;
 		}
 
-		(int Start, int End) visibleRange = GetVisibleSourceLineRange(DataMirrorPaddingLines);
-		List<WatchItem> candidates = GetInlineWatchCandidates(visibleRange);
-		int first = Math.Max(visibleRange.Start, source.StartLine);
-		int last = Math.Min(visibleRange.End, GetSourceEndLine(source));
-		if (last < first)
+		if (force)
 		{
-			return;
-		}
-
-		var signatureBuilder = new StringBuilder();
-		for (int absoluteLine = first; absoluteLine <= last; absoluteLine++)
-		{
-			int sourceIndex = absoluteLine - source.StartLine;
-			if (sourceIndex < 0 || sourceIndex >= source.Lines.Count || sourceIndex >= _codeEditor.Lines.Count)
+			_lastFunctionCodeText = "";
+			if (!ReferenceEquals(_functionCodeBox, _dataCodeBox))
 			{
-				continue;
+				_lastDataCodeText = "";
 			}
-
-			string rawLine = source.Lines[sourceIndex];
-			List<string> values = BuildInlineWatchValues(rawLine, candidates);
-			string valueText = BuildCodeValueOverlayText(values);
-			bool trueCondition = EvaluateIfCondition(rawLine, candidates) == ConditionEval.True;
-			signatureBuilder
-				.Append(sourceIndex)
-				.Append(':')
-				.Append(valueText)
-				.Append(':')
-				.Append(trueCondition ? '1' : '0')
-				.Append('|');
 		}
-
-		string signature = signatureBuilder.ToString();
-		if (!force && signature.Equals(_lastScintillaValueMarginSignature, StringComparison.Ordinal))
-		{
-			UpdateCodeValueOverlay();
-			RefreshScintillaVisibleConditionHighlights();
-			_nextInlineValueFadeUtc = null;
-			return;
-		}
-		_lastScintillaValueMarginSignature = signature;
-
-		for (int absoluteLine = first; absoluteLine <= last; absoluteLine++)
-		{
-			int sourceIndex = absoluteLine - source.StartLine;
-			if (sourceIndex < 0 || sourceIndex >= source.Lines.Count || sourceIndex >= _codeEditor.Lines.Count)
-			{
-				continue;
-			}
-
-			string rawLine = source.Lines[sourceIndex];
-			_codeEditor.Lines[sourceIndex].MarkerDelete(ScintillaMarkerTrueLine);
-			ApplyScintillaValueColorToLine(sourceIndex, fresh: false);
-			ApplyScintillaForceHoldIndicatorsToLine(sourceIndex, rawLine, candidates);
-		}
-
-		UpdateCodeValueOverlay(force: true);
+		_functionCodeDirty = true;
+		_dataCodeDirty = ReferenceEquals(_functionCodeBox, _dataCodeBox);
 		RefreshScintillaVisibleConditionHighlights(force: true);
 		_nextInlineValueFadeUtc = null;
 	}
@@ -16775,11 +17210,17 @@ public sealed partial class MainForm : Form
 		_codeEditor.IndicatorClearRange(start, length);
 		_codeEditor.IndicatorCurrent = ScintillaIndicatorValueFresh;
 		_codeEditor.IndicatorClearRange(start, length);
+		_codeEditor.IndicatorCurrent = ScintillaIndicatorValueNormalBorder;
+		_codeEditor.IndicatorClearRange(start, length);
+		_codeEditor.IndicatorCurrent = ScintillaIndicatorValueFreshBorder;
+		_codeEditor.IndicatorClearRange(start, length);
 		_codeEditor.IndicatorCurrent = ScintillaIndicatorValueNormalText;
 		_codeEditor.IndicatorClearRange(start, length);
 		_codeEditor.IndicatorCurrent = ScintillaIndicatorValueFreshText;
 		_codeEditor.IndicatorClearRange(start, length);
 		_codeEditor.IndicatorCurrent = fresh ? ScintillaIndicatorValueFresh : ScintillaIndicatorValueNormal;
+		_codeEditor.IndicatorFillRange(start, length);
+		_codeEditor.IndicatorCurrent = fresh ? ScintillaIndicatorValueFreshBorder : ScintillaIndicatorValueNormalBorder;
 		_codeEditor.IndicatorFillRange(start, length);
 		_codeEditor.IndicatorCurrent = fresh ? ScintillaIndicatorValueFreshText : ScintillaIndicatorValueNormalText;
 		_codeEditor.IndicatorFillRange(start, length);
@@ -16904,11 +17345,15 @@ public sealed partial class MainForm : Form
 		{
 			int lineNumber = renderSource.StartLine + i;
 			string rawLine = renderSource.Lines[i];
-			string displayRawLine = includeValues && inlineValuesInText ? InsertInlineWatchValues(rawLine, inlineCandidates) : rawLine;
-			string line = FormatCodeLineForDisplay(displayRawLine, ref displayIndent);
+			string line = FormatCodeLineForDisplay(rawLine, ref displayIndent);
+			List<InlineValueSpan> valueSpans = new List<InlineValueSpan>();
+			if (includeValues && inlineValuesInText)
+			{
+				line = InsertInlineWatchValues(line, inlineCandidates, out valueSpans);
+			}
 			List<string> values = includeValues ? BuildInlineWatchValues(rawLine, inlineCandidates) : new List<string>();
 			bool isTrueCondition = includeValues && EvaluateIfCondition(rawLine, inlineCandidates) == ConditionEval.True;
-			renderedLines.Add(new CodeLineRender(lineNumber, line, values, isTrueCondition));
+			renderedLines.Add(new CodeLineRender(lineNumber, line, values, isTrueCondition, valueSpans));
 			if (includeLineNumbersInText)
 			{
 				plainBuilder.Append(lineNumber.ToString().PadLeft(5)).Append("  ");
@@ -17695,8 +18140,92 @@ public sealed partial class MainForm : Form
 		return result;
 	}
 
-	private static string InsertInlineWatchValues(string line, IReadOnlyList<WatchItem> candidates)
+	private IReadOnlyList<InlineWatchValuePlacement> BuildInlineWatchValuePlacements(string line, IReadOnlyList<WatchItem> candidates)
 	{
+		if (candidates.Count == 0 || string.IsNullOrWhiteSpace(line))
+		{
+			return Array.Empty<InlineWatchValuePlacement>();
+		}
+
+		string searchableLine = GetCodeSearchPortion(line);
+		if (string.IsNullOrWhiteSpace(searchableLine))
+		{
+			return Array.Empty<InlineWatchValuePlacement>();
+		}
+
+		var result = new List<InlineWatchValuePlacement>();
+		var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+		DateTime now = DateTime.Now;
+		foreach (WatchItem item in candidates)
+		{
+			(string Token, int Index) token = FindWatchTokenWithIndex(searchableLine, item.Name);
+			if (token.Token.Length == 0 || !seen.Add(token.Token))
+			{
+				continue;
+			}
+			if (!TryFormatInlineWatchPureValue(item, out string value))
+			{
+				continue;
+			}
+
+			result.Add(new InlineWatchValuePlacement(item, token.Token, token.Index, value, IsWatchValueFresh(item, now)));
+		}
+
+		return result
+			.OrderBy(x => x.TokenIndex)
+			.ThenByDescending(x => x.Fresh)
+			.ToList();
+	}
+
+	private static int FindSimpleAssignmentOperatorIndex(string line)
+	{
+		bool inString = false;
+		bool inChar = false;
+		bool escape = false;
+		for (int i = 0; i < line.Length; i++)
+		{
+			char c = line[i];
+			if (escape)
+			{
+				escape = false;
+				continue;
+			}
+			if ((inString || inChar) && c == '\\')
+			{
+				escape = true;
+				continue;
+			}
+			if (!inChar && c == '"')
+			{
+				inString = !inString;
+				continue;
+			}
+			if (!inString && c == '\'')
+			{
+				inChar = !inChar;
+				continue;
+			}
+			if (inString || inChar || c != '=')
+			{
+				continue;
+			}
+
+			char previous = i > 0 ? line[i - 1] : '\0';
+			char next = i + 1 < line.Length ? line[i + 1] : '\0';
+			if (previous == '=' || previous == '!' || previous == '<' || previous == '>' || next == '=')
+			{
+				continue;
+			}
+
+			return i;
+		}
+
+		return -1;
+	}
+
+	private string InsertInlineWatchValues(string line, IReadOnlyList<WatchItem> candidates, out List<InlineValueSpan> valueSpans)
+	{
+		valueSpans = new List<InlineValueSpan>();
 		if (candidates.Count == 0 || string.IsNullOrWhiteSpace(line))
 		{
 			return line;
@@ -17710,45 +18239,113 @@ public sealed partial class MainForm : Form
 			return line;
 		}
 
-		var values = new List<string>();
-		var inserted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-		int total = 0;
-		foreach (WatchItem item in candidates)
-		{
-			string token = FindWatchTokenInLine(line, item.Name);
-			if (token.Length == 0)
-			{
-				continue;
-			}
-			if (!inserted.Add(token))
-			{
-				continue;
-			}
-
-			if (!TryFormatInlineWatchValue(item, out string value))
-			{
-				continue;
-			}
-
-			total++;
-			if (values.Count < 4)
-			{
-				values.Add(token + "=" + value);
-			}
-		}
-
-		if (values.Count == 0)
+		IReadOnlyList<InlineWatchValuePlacement> placements = BuildInlineWatchValuePlacements(line, candidates);
+		if (placements.Count == 0)
 		{
 			return line;
 		}
 
-		string suffix = "    //值:【" + string.Join("，", values);
-		if (total > values.Count)
+		var builder = new StringBuilder(line);
+		int insertedOffset = 0;
+		foreach (InlineWatchValuePlacement placement in placements.OrderBy(x => x.TokenIndex))
 		{
-			suffix += "，+" + (total - values.Count).ToString(CultureInfo.InvariantCulture);
+			string value = NormalizeInlineRenderedValue(placement.Value);
+			if (value.Length == 0)
+			{
+				continue;
+			}
+
+			int tokenEnd = Math.Clamp(placement.TokenIndex + placement.Token.Length + insertedOffset, 0, builder.Length);
+			string inlineText = " " + value + " ";
+			builder.Insert(tokenEnd, inlineText);
+			valueSpans.Add(new InlineValueSpan(tokenEnd + 1, value.Length, placement.Fresh));
+			insertedOffset += inlineText.Length;
 		}
-		suffix += "】";
-		return line.TrimEnd('\r', '\n') + suffix;
+
+		valueSpans = valueSpans
+			.OrderBy(span => span.Start)
+			.ToList();
+		return builder.ToString();
+	}
+
+	private static string NormalizeInlineRenderedValue(string value)
+	{
+		if (string.IsNullOrWhiteSpace(value))
+		{
+			return "";
+		}
+
+		value = Regex.Replace(value.Trim(), @"\s+", "");
+		return value.Length <= 18 ? value : value.Substring(0, 18);
+	}
+
+	private static string GetCodeSearchPortion(string line)
+	{
+		if (string.IsNullOrEmpty(line))
+		{
+			return "";
+		}
+
+		bool inString = false;
+		bool inChar = false;
+		bool escape = false;
+		for (int i = 0; i < line.Length; i++)
+		{
+			char c = line[i];
+			char next = i + 1 < line.Length ? line[i + 1] : '\0';
+			if (escape)
+			{
+				escape = false;
+				continue;
+			}
+			if ((inString || inChar) && c == '\\')
+			{
+				escape = true;
+				continue;
+			}
+			if (!inChar && c == '"')
+			{
+				inString = !inString;
+				continue;
+			}
+			if (!inString && c == '\'')
+			{
+				inChar = !inChar;
+				continue;
+			}
+			if (inString || inChar)
+			{
+				continue;
+			}
+			if (c == '/' && (next == '/' || next == '*'))
+			{
+				return line.Substring(0, i);
+			}
+		}
+
+		return line;
+	}
+
+	private static bool TryFormatInlineWatchPureValue(WatchItem item, out string value)
+	{
+		if (!string.IsNullOrWhiteSpace(item.DisplayValue))
+		{
+			value = item.DisplayValue.Trim();
+			return true;
+		}
+		if (!string.IsNullOrWhiteSpace(item.ValueDec))
+		{
+			value = item.ValueDec.Trim();
+			return true;
+		}
+		if (!string.IsNullOrWhiteSpace(item.ValueHex))
+		{
+			value = item.ValueHex.Trim();
+			return true;
+		}
+
+		value = "";
+		return false;
 	}
 
 	private static bool TryFormatInlineWatchValue(WatchItem item, out string value)
@@ -18249,6 +18846,25 @@ public sealed partial class MainForm : Form
 		return "";
 	}
 
+	private static (string Token, int Index) FindWatchTokenWithIndex(string line, string watchName)
+	{
+		if (string.IsNullOrWhiteSpace(line) || string.IsNullOrWhiteSpace(watchName))
+		{
+			return ("", -1);
+		}
+
+		foreach (string alias in WatchIdentifierAliases(watchName).OrderByDescending(x => x.Length))
+		{
+			int index = FindIdentifierIndex(line, alias);
+			if (index >= 0)
+			{
+				return (alias, index);
+			}
+		}
+
+		return ("", -1);
+	}
+
 	private static bool LineMentionsWatch(string line, string watchName)
 	{
 		if (string.IsNullOrWhiteSpace(line) || string.IsNullOrWhiteSpace(watchName))
@@ -18391,7 +19007,6 @@ public sealed partial class MainForm : Form
 		}
 
 		bool sourceNeedsRefresh = false;
-		bool codeValueLayerNeedsRefresh = false;
 		bool insightNeedsRefresh = false;
 		List<string>? visibleRefreshLines = null;
 		DateTime now = DateTime.Now;
@@ -18452,7 +19067,6 @@ public sealed partial class MainForm : Form
 						visibleRefreshLines ??= GetVisibleRawLines(DataMirrorPaddingLines).ToList();
 						sourceNeedsRefresh |= VisibleRangeMentionsWatch(item, visibleRefreshLines);
 					}
-					codeValueLayerNeedsRefresh = true;
 					if (!displayValue.Equals(item.DisplayValue, StringComparison.Ordinal))
 					{
 						RefreshValueCell(item);
@@ -18483,12 +19097,20 @@ public sealed partial class MainForm : Form
 			_grid.ResumeLayout();
 		}
 
-		if (sourceNeedsRefresh || codeValueLayerNeedsRefresh)
+		if (sourceNeedsRefresh)
 		{
 			UpdateVisibleValuesLabel();
 			string conditionSignature = BuildVisibleConditionSignature();
 			_lastVisibleConditionSignature = conditionSignature;
-			RefreshScintillaVisibleRuntimeValues(force: true);
+			if (ShouldShowInlineCodeValues())
+			{
+				_functionCodeDirty = true;
+				_dataCodeDirty = ReferenceEquals(_functionCodeBox, _dataCodeBox);
+			}
+			else
+			{
+				RefreshScintillaVisibleRuntimeValues(force: true);
+			}
 		}
 		if (insightNeedsRefresh)
 		{
@@ -20489,9 +21111,6 @@ public sealed partial class MainForm : Form
 	private sealed class CodeValueOverlay : Control
 	{
 		private IReadOnlyList<CodeValueOverlayRow> _rows = Array.Empty<CodeValueOverlayRow>();
-		private Color _valueBack = Color.FromArgb(34, 197, 94);
-		private Color _staleBack = Color.FromArgb(31, 41, 55);
-		private Color _trueBack = Color.FromArgb(21, 128, 61);
 		private int _rowHeight = 18;
 
 		public CodeValueOverlay()
@@ -20519,14 +21138,23 @@ public sealed partial class MainForm : Form
 			Color trueBack,
 			int rowHeight)
 		{
+			List<Rectangle> oldRects = _rows
+				.Select(GetRowRectangle)
+				.Where(rect => !rect.IsEmpty)
+				.ToList();
 			_rows = rows;
 			BackColor = Color.Transparent;
 			ForeColor = foreColor;
-			_valueBack = valueBack;
-			_staleBack = staleBack;
-			_trueBack = trueBack;
 			_rowHeight = Math.Max(16, rowHeight);
 			UpdateClippingRegion();
+			foreach (Rectangle rect in oldRects)
+			{
+				Parent?.Invalidate(rect, true);
+			}
+			foreach (Rectangle rect in _rows.Select(GetRowRectangle).Where(rect => !rect.IsEmpty))
+			{
+				Parent?.Invalidate(rect, true);
+			}
 			Invalidate();
 		}
 
@@ -20575,7 +21203,7 @@ public sealed partial class MainForm : Form
 				Font,
 				new Size(10000, _rowHeight),
 				TextFormatFlags.SingleLine | TextFormatFlags.NoPadding | TextFormatFlags.NoClipping);
-			int width = Math.Max(34, textSize.Width + 10);
+			int width = Math.Max(8, textSize.Width);
 			int x = Math.Clamp(row.X, 0, Math.Max(0, Width - 12));
 			if (x + width > Width - 8)
 			{
@@ -20602,24 +21230,184 @@ public sealed partial class MainForm : Form
 		{
 			foreach (CodeValueOverlayRow row in _rows)
 			{
-				Color fillColor = row.TrueCondition
-					? _trueBack
-					: (row.Fresh ? _valueBack : _staleBack);
 				Rectangle rect = GetRowRectangle(row);
 				if (rect.IsEmpty)
 				{
 					continue;
 				}
 
-				using SolidBrush fill = new SolidBrush(fillColor);
-				e.Graphics.FillRectangle(fill, rect);
-				using Pen border = new Pen(Color.FromArgb(120, ControlPaint.Light(fillColor)), 1f);
-				e.Graphics.DrawRectangle(border, rect);
 				TextRenderer.DrawText(
 					e.Graphics,
 					row.Text,
 					Font,
-					Rectangle.Inflate(rect, -4, 0),
+					rect,
+					ForeColor,
+					TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding | TextFormatFlags.NoClipping);
+			}
+		}
+	}
+
+	private sealed class CodeValueOverlayWindow : Form
+	{
+		private IReadOnlyList<CodeValueOverlayRow> _rows = Array.Empty<CodeValueOverlayRow>();
+		private int _rowHeight = 18;
+		private string _lastRenderSignature = "";
+
+		public CodeValueOverlayWindow()
+		{
+			FormBorderStyle = FormBorderStyle.None;
+			ShowInTaskbar = false;
+			StartPosition = FormStartPosition.Manual;
+			BackColor = Color.Fuchsia;
+			TransparencyKey = Color.Fuchsia;
+			SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+		}
+
+		protected override bool ShowWithoutActivation => true;
+
+		protected override CreateParams CreateParams
+		{
+			get
+			{
+				CreateParams cp = base.CreateParams;
+				cp.ExStyle |= 0x20;       // WS_EX_TRANSPARENT: let mouse reach Scintilla.
+				cp.ExStyle |= 0x80;       // WS_EX_TOOLWINDOW: keep it out of Alt+Tab.
+				cp.ExStyle |= 0x08000000; // WS_EX_NOACTIVATE.
+				return cp;
+			}
+		}
+
+		public void ShowRows(
+			Form owner,
+			Rectangle screenBounds,
+			IReadOnlyList<CodeValueOverlayRow> rows,
+			Color backColor,
+			Color foreColor,
+			int rowHeight)
+		{
+			if (rows.Count == 0 || screenBounds.Width <= 0 || screenBounds.Height <= 0 || owner.WindowState == FormWindowState.Minimized)
+			{
+				HideOverlay();
+				return;
+			}
+
+			string renderSignature = $"{screenBounds.Left}:{screenBounds.Top}:{screenBounds.Width}:{screenBounds.Height}|" +
+				$"{foreColor.ToArgb()}|{Font.Name}:{Font.SizeInPoints:0.0}:{Font.Style}|{rowHeight}|" +
+				string.Join("|", rows.Select(row => $"{row.X}:{row.Y}:{row.Text}"));
+			if (Visible && renderSignature.Equals(_lastRenderSignature, StringComparison.Ordinal))
+			{
+				return;
+			}
+
+			_lastRenderSignature = renderSignature;
+			_rows = rows;
+			ForeColor = foreColor;
+			_rowHeight = Math.Max(16, rowHeight);
+			Bounds = screenBounds;
+			UpdateClippingRegion();
+			if (!Visible)
+			{
+				Show(owner);
+			}
+			Invalidate();
+		}
+
+		public void HideOverlay()
+		{
+			_rows = Array.Empty<CodeValueOverlayRow>();
+			_lastRenderSignature = "";
+			Region? oldRegion = Region;
+			Region = null;
+			oldRegion?.Dispose();
+			if (Visible)
+			{
+				Hide();
+			}
+		}
+
+		protected override void OnResize(EventArgs e)
+		{
+			base.OnResize(e);
+			UpdateClippingRegion();
+		}
+
+		private void UpdateClippingRegion()
+		{
+			Region? nextRegion = null;
+			foreach (CodeValueOverlayRow row in _rows)
+			{
+				Rectangle rect = GetRowRectangle(row);
+				if (rect.IsEmpty)
+				{
+					continue;
+				}
+
+				if (nextRegion == null)
+				{
+					nextRegion = new Region(rect);
+				}
+				else
+				{
+					nextRegion.Union(rect);
+				}
+			}
+
+			nextRegion ??= new Region(Rectangle.Empty);
+			Region? oldRegion = Region;
+			Region = nextRegion;
+			oldRegion?.Dispose();
+		}
+
+		private Rectangle GetRowRectangle(CodeValueOverlayRow row)
+		{
+			if (row.Y > Height || row.Y + _rowHeight < 0 || Width <= 0)
+			{
+				return Rectangle.Empty;
+			}
+
+			Size textSize = TextRenderer.MeasureText(
+				row.Text,
+				Font,
+				new Size(10000, _rowHeight),
+				TextFormatFlags.SingleLine | TextFormatFlags.NoPadding | TextFormatFlags.NoClipping);
+			int width = Math.Max(8, textSize.Width);
+			int x = Math.Clamp(row.X, 0, Math.Max(0, Width - 12));
+			if (x + width > Width - 8)
+			{
+				return Rectangle.Empty;
+			}
+
+			return new Rectangle(x, row.Y + 1, width, Math.Max(14, _rowHeight - 2));
+		}
+
+		protected override void WndProc(ref Message m)
+		{
+			const int wmNcHitTest = 0x0084;
+			const int htTransparent = -1;
+			if (m.Msg == wmNcHitTest)
+			{
+				m.Result = new IntPtr(htTransparent);
+				return;
+			}
+
+			base.WndProc(ref m);
+		}
+
+		protected override void OnPaint(PaintEventArgs e)
+		{
+			foreach (CodeValueOverlayRow row in _rows)
+			{
+				Rectangle rect = GetRowRectangle(row);
+				if (rect.IsEmpty)
+				{
+					continue;
+				}
+
+				TextRenderer.DrawText(
+					e.Graphics,
+					row.Text,
+					Font,
+					rect,
 					ForeColor,
 					TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding | TextFormatFlags.NoClipping);
 			}
@@ -21151,13 +21939,23 @@ public sealed partial class MainForm : Form
 
 	private void ApplyCodeValueTagPaletteForTheme(string name)
 	{
-		Color foreColor = PickHighContrastCodeValueForeColor(_surface, name);
-		_codeValueTagActiveBackColor = _surface;
-		_codeValueTagInactiveBackColor = _surface;
+		bool lightSurface = RelativeLuminance(_surface) >= 0.45;
+		Color foreColor = PickInlineCodeValueForeColor(_surface);
+		Color backColor = lightSurface ? Color.FromArgb(181, 235, 242) : Color.FromArgb(8, 74, 82);
+		_codeValueTagBorderColor = lightSurface ? Color.FromArgb(14, 116, 144) : Color.FromArgb(34, 211, 238);
+		_codeValueTagActiveBackColor = backColor;
+		_codeValueTagInactiveBackColor = backColor;
 		_codeValueTagActiveForeColor = foreColor;
 		_codeValueTagInactiveForeColor = foreColor;
-		_codeValueBackColor = _surface;
-		_codeValueStaleBackColor = _surface;
+		_codeValueBackColor = backColor;
+		_codeValueStaleBackColor = backColor;
+	}
+
+	private static Color PickInlineCodeValueForeColor(Color surface)
+	{
+		return RelativeLuminance(surface) >= 0.45
+			? Color.FromArgb(8, 105, 122)
+			: Color.FromArgb(34, 211, 238);
 	}
 
 	private Color PickHighContrastCodeValueForeColor(Color surface, string themeName)

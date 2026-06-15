@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net.Http;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
@@ -113,7 +114,7 @@ internal sealed class AppUpdateService
             return new UpdateCheckResult(true, false, "服务器版本文件缺少 version。", config, manifest);
         }
 
-        if (CompareVersions(manifest.Version, currentVersion) <= 0)
+        if (VersionsEquivalent(manifest.Version, currentVersion))
         {
             return new UpdateCheckResult(true, false, $"当前已经是最新版本：{currentVersion}。", config, manifest);
         }
@@ -162,7 +163,7 @@ internal sealed class AppUpdateService
             Force = config.Force
         };
 
-        if (CompareVersions(manifest.Version, currentVersion) <= 0)
+        if (VersionsEquivalent(manifest.Version, currentVersion))
         {
             return new UpdateCheckResult(true, false, $"当前已经是最新版本：{currentVersion}。", config, manifest);
         }
@@ -246,7 +247,10 @@ internal sealed class AppUpdateService
         string exePath = Environment.ProcessPath ?? Path.Combine(installDirectory, "上位机监控.exe");
         string scriptPath = Path.Combine(_downloadDirectory, "run_update.ps1");
         Directory.CreateDirectory(_downloadDirectory);
-        File.WriteAllText(scriptPath, BuildUpdaterScript(Process.GetCurrentProcess().Id, installDirectory, packagePath, exePath));
+        File.WriteAllText(
+            scriptPath,
+            BuildUpdaterScript(Process.GetCurrentProcess().Id, installDirectory, packagePath, exePath),
+            new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
 
         var processStartInfo = new ProcessStartInfo("powershell.exe")
         {
@@ -355,6 +359,18 @@ internal sealed class AppUpdateService
         return Convert.ToHexString(hash).ToLowerInvariant();
     }
 
+    private static bool VersionsEquivalent(string left, string right)
+    {
+        return NormalizeVersionForEquality(left).Equals(
+            NormalizeVersionForEquality(right),
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string NormalizeVersionForEquality(string value)
+    {
+        return (value ?? "").Trim();
+    }
+
     private static int CompareVersions(string left, string right)
     {
         int[] a = ExtractVersionParts(left);
@@ -394,17 +410,64 @@ $processId = {{processId}}
 $installDir = {{Quote(installDirectory)}}
 $packageZip = {{Quote(packagePath)}}
 $exePath = {{Quote(exePath)}}
+$exeName = [System.IO.Path]::GetFileName($exePath)
 $logDir = Join-Path $env:APPDATA 'CanVariableMonitor'
 $logPath = Join-Path $logDir 'update.log'
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 function Write-UpdateLog([string]$message) {
-    Add-Content -LiteralPath $logPath -Value ('[{0:yyyy-MM-dd HH:mm:ss.fff}] {1}' -f (Get-Date), $message)
+    Add-Content -LiteralPath $logPath -Encoding UTF8 -Value ('[{0:yyyy-MM-dd HH:mm:ss.fff}] {1}' -f (Get-Date), $message)
+}
+
+function Get-InstallProcesses {
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.ExecutablePath -and
+            $_.ExecutablePath.StartsWith($installDir, [System.StringComparison]::OrdinalIgnoreCase)
+        }
+}
+
+function Stop-InstallProcesses {
+    for ($i = 0; $i -lt 80; $i++) {
+        $running = @(Get-InstallProcesses)
+        if ($running.Count -eq 0) {
+            return
+        }
+
+        foreach ($proc in $running) {
+            Write-UpdateLog ('Stop install process: ' + $proc.ProcessId + ' ' + $proc.ExecutablePath)
+            Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+
+        Start-Sleep -Milliseconds 250
+    }
+
+    throw 'Install files are still locked by a running process.'
+}
+
+function Copy-UpdateItem {
+    param([string]$SourcePath, [string]$DestinationDirectory)
+
+    $lastError = $null
+    for ($i = 0; $i -lt 80; $i++) {
+        try {
+            Copy-Item -LiteralPath $SourcePath -Destination $DestinationDirectory -Recurse -Force -ErrorAction Stop
+            return
+        } catch {
+            $lastError = $_.Exception.Message
+            Write-UpdateLog ('Copy retry ' + ($i + 1) + ': ' + $lastError)
+            Stop-InstallProcesses
+            Start-Sleep -Milliseconds 250
+        }
+    }
+
+    throw $lastError
 }
 
 try {
-    Write-UpdateLog '等待主程序退出。'
+    Write-UpdateLog 'Waiting for main process to exit.'
     Wait-Process -Id $processId -Timeout 90 -ErrorAction SilentlyContinue
-    Start-Sleep -Milliseconds 800
+    Start-Sleep -Milliseconds 1000
+    Stop-InstallProcesses
     Get-Process 'CanVariableMonitor.OfflineCWorker' -ErrorAction SilentlyContinue | Stop-Process -Force
 
     $extractDir = Join-Path $env:TEMP ('canmon_update_extract_' + [Guid]::NewGuid().ToString('N'))
@@ -413,19 +476,19 @@ try {
 
     $sourceDir = $extractDir
     $items = @(Get-ChildItem -LiteralPath $extractDir -Force)
-    if ($items.Count -eq 1 -and $items[0].PSIsContainer -and (Test-Path -LiteralPath (Join-Path $items[0].FullName '上位机监控.exe'))) {
+    if ($items.Count -eq 1 -and $items[0].PSIsContainer -and (Test-Path -LiteralPath (Join-Path $items[0].FullName $exeName))) {
         $sourceDir = $items[0].FullName
     }
 
-    Write-UpdateLog ('复制更新文件：' + $sourceDir)
+    Write-UpdateLog ('Copy update files from: ' + $sourceDir)
     Get-ChildItem -LiteralPath $sourceDir -Force | ForEach-Object {
-        Copy-Item -LiteralPath $_.FullName -Destination $installDir -Recurse -Force
+        Copy-UpdateItem -SourcePath $_.FullName -DestinationDirectory $installDir
     }
 
-    Write-UpdateLog '更新完成，重启主程序。'
+    Write-UpdateLog 'Update completed. Restarting main app.'
     Start-Process -FilePath $exePath -WorkingDirectory $installDir
 } catch {
-    Write-UpdateLog ('更新失败：' + $_.Exception.Message)
+    Write-UpdateLog ('Update failed: ' + $_.Exception.Message)
 }
 """;
     }
