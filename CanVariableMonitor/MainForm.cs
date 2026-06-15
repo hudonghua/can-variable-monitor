@@ -5904,8 +5904,7 @@ public sealed partial class MainForm : Form
 		}
 
 		FunctionSourceView? mainLoopTick = null;
-		bool useAutomaticMainLoop = configuredRoots.Count == 0 &&
-			TryBuildOfflineMainLoopTickSource(directory, out mainLoopTick) &&
+		bool useAutomaticMainLoop = TryBuildOfflineMainLoopTickSource(directory, out mainLoopTick) &&
 			mainLoopTick != null;
 		if (useAutomaticMainLoop && mainLoopTick != null)
 		{
@@ -5918,7 +5917,9 @@ public sealed partial class MainForm : Form
 			{
 				break;
 			}
+			bool isConfiguredRoot = configuredRoots.Contains(candidate.FunctionName, StringComparer.OrdinalIgnoreCase);
 			if (useAutomaticMainLoop &&
+				!isConfiguredRoot &&
 				!candidate.Reason.Contains("任务函数指针", StringComparison.OrdinalIgnoreCase) &&
 				!candidate.Reason.Contains("显示", StringComparison.OrdinalIgnoreCase))
 			{

@@ -108,6 +108,22 @@ can_monitor_latest.zip
 - 真实打开发布版 `上位机监控 V1.3`，工程 `E:\AI_划时代\旭工\干喷\程序\显示屏7-200\MC_LCD - 7Control_V1.2`，点击“离线”后日志显示 `离线性能：循环，目标 99 ms，耗时 4389 ms，变量 887，执行 1 拍，刷新 887，跳过 0`，10 秒后仍为 `执行 1 拍`。
 - 直接运行最新临时 `canmon_tick.c` 输出 914 行快照，检测到 8 个变量 tick 后变化：`gYunx20ms/gYunx10ms/gYunx220/gYunx40ms/gYunx60ms` 从 87 到 88，`Prog_Run_1s` 从 36 到 37，`Prog_Run_2s` 从 25 到 26，`Prog_Run_3s` 从 3 到 4。
 
+## 2026-06-15 离线入口语义修正
+
+用户实测发现：同一个全局变量在一个 `.c` 写、另一个 `.c` 读并判断时，如果手动选择某个离线入口，变量链路可能不执行；切回“自动入口”后恢复正常。根因是旧逻辑一旦存在手动入口配置，就禁用了自动 `main while(1)` tick，导致真实主循环里的跨文件调度顺序被截断。
+
+本轮修正：
+
+- `BuildOfflineApplicationRootSources()` 不再让手动入口覆盖自动主循环。
+- 只要能从 `main` 抽取 `while(1)` / `for(;;)`，都会优先加入 `__canmon_main_loop_tick`。
+- 手动选择的离线入口保留，但语义变成“追加入口/观察入口”，不再切断自动 main-loop。
+- 这样跨 `.c` 的中间全局状态仍按主循环顺序跑；用户误选业务函数时，也不应破坏自动入口。
+
+验证：
+
+- 最小 worker 探针已验证 `writer.c` 写 `SharedFlag`、`reader.c` 读 `SharedFlag` 后 `OutputCount++` 可以跨文件生效。
+- `dotnet build .\CanVariableMonitor\CanVariableMonitor.csproj -v:minimal`：0 错误，59 个历史警告。
+
 ## 绝对不要上传的内容
 
 不要把以下内容提交到这个仓库或任何交接包：
