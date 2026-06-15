@@ -75,6 +75,8 @@ try {
                     "void App_Tick10ms(void)",
                     "{",
                     "  App_BusinessStep();",
+                    "  TaskHook();",
+                    "  main();",
                     "  CAN_SendFrame(0, 0);",
                     "}"
                 )
@@ -117,7 +119,8 @@ try {
             [ordered]@{ key = "InputReady"; name = "InputReady"; address = 1; size = 1; typeName = "uint8"; rawValue = 0; forceActive = $false; aliases = @("InputReady") },
             [ordered]@{ key = "ModeAuto"; name = "ModeAuto"; address = 2; size = 1; typeName = "uint8"; rawValue = 0; forceActive = $false; aliases = @("ModeAuto") },
             [ordered]@{ key = "OutputCount"; name = "OutputCount"; address = 3; size = 2; typeName = "uint16"; rawValue = 0; forceActive = $false; aliases = @("OutputCount") },
-            [ordered]@{ key = "OutputLatch"; name = "OutputLatch"; address = 4; size = 1; typeName = "uint8"; rawValue = 0; forceActive = $false; aliases = @("OutputLatch") }
+            [ordered]@{ key = "OutputLatch"; name = "OutputLatch"; address = 4; size = 1; typeName = "uint8"; rawValue = 0; forceActive = $false; aliases = @("OutputLatch") },
+            [ordered]@{ key = "TaskHook"; name = "TaskHook"; address = 5; size = 4; typeName = "uint32"; rawValue = 0; forceActive = $false; aliases = @("TaskHook") }
         )
     }
 
@@ -135,7 +138,7 @@ try {
         Assert-Equal $result.ok $true "RunTick $i failed"
         Assert-Equal $result.values.OutputCount $i "OutputCount did not advance on tick $i"
         $stubWarnings = @($result.coverage | Where-Object { $_ -like "*stub*" })
-        $businessStubWarnings = @($stubWarnings | Where-Object { $_ -like "*业务调用被 stub*" })
+        $businessStubWarnings = @($stubWarnings | Where-Object { $_ -like "*业务调用被 stub*" -and $_ -notlike "*TaskHook*" })
         if ($businessStubWarnings.Count -gt 0) {
             throw "Business helper was stubbed during self-test: $($businessStubWarnings -join '; ')"
         }
@@ -165,8 +168,20 @@ try {
     if ($generated -notmatch "__canmon_record_output\(""CAN_SendFrame""\)") {
         throw "Output boundary CAN_SendFrame was not converted to output recording stub."
     }
+    if ($generated -match "(?m)^#define\s+TaskHook\s+__cm_v\d+\s*$") {
+        throw "Function-like variable alias TaskHook was emitted as a storage macro and can conflict with the TaskHook() stub."
+    }
+    if ($generated -notmatch "(?m)^#define\s+TaskHook\(\.\.\.\)\s+__canmon_stub_TaskHook\(\)\s*$") {
+        throw "Function-like TaskHook() call was not converted to a callable stub macro."
+    }
+    if ($generated -notmatch "(?m)^#define\s+main\(\.\.\.\)\s+__canmon_stub_main\(\)\s*$") {
+        throw "Customer main() reference was not converted to a stub macro."
+    }
+    if ($generated -notmatch "(?s)#undef\s+main\s+int\s+main\(\)") {
+        throw "Worker harness main() was not protected from the customer main() stub macro."
+    }
 
-    Write-Host "Offline worker self-test passed: generic app chain advanced 5 ticks; bottom CAN_SendFrame was recorded, not compiled as driver code."
+    Write-Host "Offline worker self-test passed: generic app chain advanced 5 ticks; output stubs and function-like variable aliases are handled."
 }
 finally {
     try {

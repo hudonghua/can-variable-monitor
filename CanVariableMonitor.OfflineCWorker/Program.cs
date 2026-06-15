@@ -614,7 +614,12 @@ internal static class SimulationCGenerator
         builder.AppendLine("extern int printf(const char*, ...);");
         builder.AppendLine();
 
+        HashSet<string> functionLikeNames = definedFunctionNames
+            .Concat(calledFunctions)
+            .Where(IsValidIdentifier)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
         Dictionary<string, string> aliasToStorage = new(StringComparer.OrdinalIgnoreCase);
+        HashSet<string> skippedFunctionLikeAliases = new(StringComparer.OrdinalIgnoreCase);
         for (int i = 0; i < project.Variables.Count; i++)
         {
             OfflineWorkerVariablePayload variable = project.Variables[i];
@@ -630,11 +635,25 @@ internal static class SimulationCGenerator
 
             foreach (string alias in variable.Aliases.Where(IsValidIdentifier).Distinct(StringComparer.OrdinalIgnoreCase))
             {
-                if (!SupportPack.IsCKeyword(alias) && !aliasToStorage.ContainsKey(alias))
+                if (SupportPack.IsCKeyword(alias) || aliasToStorage.ContainsKey(alias))
+                {
+                    continue;
+                }
+                if (functionLikeNames.Contains(alias))
+                {
+                    skippedFunctionLikeAliases.Add(alias);
+                    continue;
+                }
+                if (!aliasToStorage.ContainsKey(alias))
                 {
                     aliasToStorage.Add(alias, storage);
                 }
             }
+        }
+        if (skippedFunctionLikeAliases.Count > 0)
+        {
+            _lastCoverageNotes.Add("离线未覆盖：变量名同时作为函数调用，已跳过变量宏别名 " +
+                string.Join(", ", skippedFunctionLikeAliases.OrderBy(name => name, StringComparer.OrdinalIgnoreCase).Take(8)));
         }
         foreach ((string alias, string storage) in aliasToStorage.OrderByDescending(p => p.Key.Length))
         {
@@ -716,6 +735,10 @@ internal static class SimulationCGenerator
             .GroupBy(source => source.FunctionName, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
 
+        if (orderedStubs.Any(stub => stub.Equals("main", StringComparison.OrdinalIgnoreCase)))
+        {
+            builder.AppendLine("#undef main");
+        }
         builder.AppendLine("int main() {");
         if (hasSchedulerFlags)
         {

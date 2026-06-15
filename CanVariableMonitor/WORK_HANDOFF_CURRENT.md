@@ -89,6 +89,25 @@ can_monitor_latest.zip
 - `OfflineWorkerSelfTest.ps1`：通过，应用层链路连续 tick，底层 `CAN_SendFrame` 被记录为输出 stub。
 - `OfflineRealProjectProbe.ps1` 三个真实工程通过：旭工干喷、江南爆破中深孔编码器铁轮版、华矿二代半液压主控。三者均以 `__canmon_main_loop_tick` 为离线入口，强制输入后目标变量变化。
 
+## 2026-06-15 离线 tick 真实执行修正
+
+用户现场再次确认“没有跑起来”时，真实日志显示 worker 已初始化，但 `RunTick()` 每轮失败，统计为 `执行 0 拍`。这不是 UI 容量限制，也不是离线按钮没开；根因是生成的临时 `canmon_tick.c` 无法通过 TinyCC。
+
+本轮修正：
+
+- 变量名和函数调用同名时，不再把变量别名生成成 `#define name __cm_vN`。例如 `gp_lcdtask` 在客户工程里既出现在变量表，也以 `gp_lcdtask(...)` 形式被调用；旧生成器会同时生成变量宏和 stub 宏，导致 TinyCC 宏重定义。
+- 客户工程里的 `main()` 引用可以被 stub 成 `__canmon_stub_main()`，但 worker 自己的 harness `int main()` 前必须 `#undef main`，否则预处理器会把 harness main 也替换成 `__canmon_stub_main`，最终报 `redefinition of '__canmon_stub_main'`。
+- `OfflineWorkerSelfTest.ps1` 加入两个回归场景：函数式变量别名 `TaskHook`，以及客户源码里调用 `main()`。自测要求前者不生成变量宏，后者不污染 worker harness main。
+
+实测验证：
+
+- `OfflineWorkerSelfTest.ps1`：通过，连续 5 tick，输出 stub 和函数式变量别名均覆盖。
+- `dotnet build .\CanVariableMonitor.OfflineCWorker\CanVariableMonitor.OfflineCWorker.csproj -v:minimal`：0 警告，0 错误。
+- `dotnet build .\CanVariableMonitor\CanVariableMonitor.csproj -v:minimal`：0 警告，0 错误。
+- `PublishUnified.ps1` 已重新发布到 `F:\工作\AI模型\s上位机\监控上位机\上位机\上位机监控_V1.2_20260612_120554`，发布包 `上位机监控_V1.3_20260615_225304.zip`。
+- 真实打开发布版 `上位机监控 V1.3`，工程 `E:\AI_划时代\旭工\干喷\程序\显示屏7-200\MC_LCD - 7Control_V1.2`，点击“离线”后日志显示 `离线性能：循环，目标 99 ms，耗时 4389 ms，变量 887，执行 1 拍，刷新 887，跳过 0`，10 秒后仍为 `执行 1 拍`。
+- 直接运行最新临时 `canmon_tick.c` 输出 914 行快照，检测到 8 个变量 tick 后变化：`gYunx20ms/gYunx10ms/gYunx220/gYunx40ms/gYunx60ms` 从 87 到 88，`Prog_Run_1s` 从 36 到 37，`Prog_Run_2s` 从 25 到 26，`Prog_Run_3s` 从 3 到 4。
+
 ## 绝对不要上传的内容
 
 不要把以下内容提交到这个仓库或任何交接包：
