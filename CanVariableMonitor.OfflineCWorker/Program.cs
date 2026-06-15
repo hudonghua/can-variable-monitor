@@ -560,7 +560,7 @@ internal static class SimulationCGenerator
             .Select(item => item.Source.FunctionName)
             .Where(IsValidIdentifier)
             .Where(name => !SupportPack.IsBuiltinFunctionName(name))
-            .Where(name => !SupportPack.IsStubOnlyFunctionName(name))
+            .Where(name => !IsHarnessReservedFunctionName(name))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         foreach ((OfflineWorkerSourcePayload _, string sanitized) in appSources)
@@ -1108,6 +1108,14 @@ internal static class SimulationCGenerator
             sanitized,
             @"(?m)^\s*(?:[A-Za-z_][A-Za-z0-9_]*\s+)+(?:\*+\s*)?" + escapedName + @"\s*\([^;{}]*\)\s*\{",
             RegexOptions.Singleline);
+    }
+
+    private static bool IsHarnessReservedFunctionName(string name)
+    {
+        return name.Equals("main", StringComparison.OrdinalIgnoreCase) ||
+            name.Equals("sprintf", StringComparison.OrdinalIgnoreCase) ||
+            name.Equals("snprintf", StringComparison.OrdinalIgnoreCase) ||
+            name.StartsWith("CanMonitor_", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string SanitizeFunctionSource(OfflineWorkerSourcePayload source, ISet<string> coverageNotes)

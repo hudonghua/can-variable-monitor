@@ -74,6 +74,7 @@ try {
                 lines = @(
                     "void App_Tick10ms(void)",
                     "{",
+                    "  DI_Scan();",
                     "  App_BusinessStep();",
                     "  TaskHook();",
                     "  main();",
@@ -93,9 +94,20 @@ try {
                 )
             },
             [ordered]@{
+                functionName = "DI_Scan"
+                filePath = "App\input.c"
+                startLine = 30
+                lines = @(
+                    "void DI_Scan(void)",
+                    "{",
+                    "  InputReady = 1;",
+                    "}"
+                )
+            },
+            [ordered]@{
                 functionName = "App_OutputLatch"
                 filePath = "App\selftest.c"
-                startLine = 20
+                startLine = 40
                 lines = @(
                     "void App_OutputLatch(unsigned int vMS, unsigned int vNo)",
                     "{",
@@ -128,8 +140,6 @@ try {
     Assert-Equal $result.ok $true "InitProject failed"
     Assert-Equal $result.engineAvailable $true "TinyCC engine unavailable"
 
-    $result = Send-WorkerCommand "ForceVariable" ([ordered]@{ key = "InputReady"; name = "InputReady"; rawValue = 1; size = 1 })
-    Assert-Equal $result.ok $true "Force InputReady failed"
     $result = Send-WorkerCommand "ForceVariable" ([ordered]@{ key = "ModeAuto"; name = "ModeAuto"; rawValue = 1; size = 1 })
     Assert-Equal $result.ok $true "Force ModeAuto failed"
 
@@ -167,6 +177,12 @@ try {
 
     if ($generated -notmatch "__canmon_record_output\(""CAN_SendFrame""\)") {
         throw "Output boundary CAN_SendFrame was not converted to output recording stub."
+    }
+    if ($generated -match "(?m)^#define\s+DI_Scan\(\.\.\.\)\s+__canmon_stub_DI_Scan\(\)\s*$") {
+        throw "Application DI_Scan() source was incorrectly converted to a stub macro."
+    }
+    if ($generated -notmatch "void\s+DI_Scan\s*\(\s*void\s*\)") {
+        throw "Application DI_Scan() source was not compiled into the offline worker."
     }
     if ($generated -match "(?m)^#define\s+TaskHook\s+__cm_v\d+\s*$") {
         throw "Function-like variable alias TaskHook was emitted as a storage macro and can conflict with the TaskHook() stub."

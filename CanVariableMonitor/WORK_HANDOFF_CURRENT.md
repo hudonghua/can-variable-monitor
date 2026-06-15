@@ -124,6 +124,23 @@ can_monitor_latest.zip
 - 最小 worker 探针已验证 `writer.c` 写 `SharedFlag`、`reader.c` 读 `SharedFlag` 后 `OutputCount++` 可以跨文件生效。
 - `dotnet build .\CanVariableMonitor\CanVariableMonitor.csproj -v:minimal`：0 错误，59 个历史警告。
 
+## 2026-06-15 应用函数被名字规则误 stub 修正
+
+用户进一步指出：失败函数基本都是简单变量赋值，并不是复杂指针、结构体或硬件寄存器。复查 worker 后确认另一个真实根因：`definedFunctionNames` 以前直接套用 `SupportPack.IsStubOnlyFunctionName()` 过滤，导致名字像底层函数的应用层函数被误当 stub。例如应用源码里真实定义的 `DI_Scan()`，即使函数体只是 `InputReady = 1;`，也会因为 `DI` 前缀被排除出真实编译函数表，最终调用走 `__canmon_stub_DI_Scan()`，简单赋值自然不会执行。
+
+本轮修正：
+
+- 应用层源码中能找到真实定义的函数，优先真实编译执行，不再因为函数名像 `DI_*` / `KEY*` / `ADC*` / `CAN*` / `PWM*` / `LCD*` 就直接 stub。
+- `SupportPack.IsStubOnlyFunctionName()` 只用于没有应用层定义的边界调用；底层/驱动缺失函数仍自动 stub/mock。
+- 保留 harness/内部保留名过滤：`main`、`sprintf`、`snprintf`、`CanMonitor_*` 仍不作为普通应用函数编译，避免污染 worker 自己的 `main()` 或监控内部逻辑。
+
+验证：
+
+- `OfflineWorkerSelfTest.ps1` 新增 `DI_Scan()` 应用源码用例，`DI_Scan()` 只做 `InputReady = 1;`；自测要求 `OutputCount` 连续递增，且生成的 `canmon_tick.c` 中必须存在 `void DI_Scan(void)`，不能出现 `#define DI_Scan(...) __canmon_stub_DI_Scan()`。
+- `OfflineWorkerSelfTest.ps1`：通过。
+- `dotnet build .\CanVariableMonitor.OfflineCWorker\CanVariableMonitor.OfflineCWorker.csproj -v:minimal`：0 警告，0 错误。
+- `dotnet build .\CanVariableMonitor\CanVariableMonitor.csproj -v:minimal`：0 错误，59 个历史警告。
+
 ## 绝对不要上传的内容
 
 不要把以下内容提交到这个仓库或任何交接包：
