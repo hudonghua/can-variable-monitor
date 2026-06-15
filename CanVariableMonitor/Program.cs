@@ -1,14 +1,29 @@
+using System.Globalization;
+
 namespace CanVariableMonitor;
 
 static class Program
 {
+    private const int AttachParentProcess = -1;
+
     [STAThread]
-    static void Main()
+    static int Main(string[] args)
     {
+        if (args.Any(arg => arg.Equals("--syntax-highlight-self-test", StringComparison.OrdinalIgnoreCase)))
+        {
+            AttachParentConsole();
+            using var writer = new StringWriter(CultureInfo.InvariantCulture);
+            int exitCode = MainForm.RunSyntaxHighlightSelfTest(writer);
+            string report = writer.ToString();
+            Console.Write(report);
+            WriteSyntaxHighlightSelfTestLog(report);
+            return exitCode;
+        }
+
         using var singleInstance = new System.Threading.Mutex(true, "CanVariableMonitor_Kangxu_SingleInstance", out bool firstInstance);
         if (!firstInstance)
         {
-            return;
+            return 0;
         }
 
         Application.ThreadException += (_, e) => WriteFatalLog("UI", e.Exception);
@@ -33,6 +48,8 @@ static class Program
         {
             Environment.Exit(0);
         }
+
+        return 0;
     }
 
     private static void WriteFatalLog(string source, Exception ex)
@@ -44,6 +61,35 @@ static class Program
             string path = Path.Combine(dir, "diagnostic.log");
             string line = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] 未捕获异常({source})：{ex}";
             File.AppendAllText(path, line + Environment.NewLine, System.Text.Encoding.UTF8);
+        }
+        catch
+        {
+        }
+    }
+
+    private static void AttachParentConsole()
+    {
+        try
+        {
+            AttachConsole(AttachParentProcess);
+            Console.SetOut(new StreamWriter(Console.OpenStandardOutput()) { AutoFlush = true });
+            Console.SetError(new StreamWriter(Console.OpenStandardError()) { AutoFlush = true });
+        }
+        catch
+        {
+        }
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool AttachConsole(int dwProcessId);
+
+    private static void WriteSyntaxHighlightSelfTestLog(string report)
+    {
+        try
+        {
+            string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "CanVariableMonitor");
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(Path.Combine(dir, "syntax_highlight_selftest.log"), report, System.Text.Encoding.UTF8);
         }
         catch
         {

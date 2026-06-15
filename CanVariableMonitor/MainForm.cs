@@ -20,7 +20,7 @@ namespace CanVariableMonitor;
 
 public sealed partial class MainForm : Form
 {
-	private const string UpperComputerVersion = "V1.41";
+	private const string UpperComputerVersion = "V1.42";
 
 	private const string AppDisplayName = "上位机监控";
 
@@ -75,6 +75,11 @@ public sealed partial class MainForm : Form
 	private enum CodeTokenVisualKind
 	{
 		Normal,
+		Keyword,
+		Preprocessor,
+		Comment,
+		StringLiteral,
+		NumberLiteral,
 		FunctionName,
 		ParameterName
 	}
@@ -757,7 +762,9 @@ public sealed partial class MainForm : Form
 		"__I", "__O", "__IO", "__IM", "__OM", "__IOM", "__INLINE", "__STATIC_INLINE",
 		"__ASM", "__packed", "__align", "__forceinline", "__no_init", "__root",
 		"BYTE", "WORD", "DWORD", "BOOL", "TRUE", "FALSE", "uchar", "ushort", "uint", "ulong",
-		"sfr", "sbit", "bit", "data", "idata", "xdata", "pdata", "code", "interrupt", "using", "reentrant"
+		"sfr", "sbit", "bit", "data", "idata", "xdata", "pdata", "code", "interrupt", "using", "reentrant",
+		"include", "define", "undef", "ifdef", "ifndef", "endif", "elif", "pragma", "error", "warning", "line",
+		"__at", "__swi", "__svc", "__task", "__value_in_regs", "__global_reg", "__packed_struct", "__packed_union"
 	};
 
 	private static readonly HashSet<string> CCodeKeywordSet = new(CCodeKeywords, StringComparer.Ordinal);
@@ -17636,88 +17643,70 @@ public sealed partial class MainForm : Form
 		for (int lineIndex = 0; lineIndex < renderedLines.Count && lineIndex < _codeEditor.Lines.Count; lineIndex++)
 		{
 			string line = renderedLines[lineIndex].Code;
-			int index = 0;
-			while (index < line.Length)
+			List<CodeTokenStyleSpan> spans = BuildCodeSyntaxStyleSpans(line, ref inBlockComment);
+			foreach (CodeTokenStyleSpan span in spans)
 			{
-				if (inBlockComment)
-				{
-					int end = line.IndexOf("*/", index, StringComparison.Ordinal);
-					if (end < 0)
-					{
-						break;
-					}
-
-					index = end + 2;
-					inBlockComment = false;
-					continue;
-				}
-
-				CommentStart comment = FindNextCommentStart(line, index);
-				int codeEnd = comment.Index >= 0 ? comment.Index : line.Length;
-				if (codeEnd > index)
-				{
-					ApplyScintillaSemanticStylesToCodeSegment(lineIndex, line, index, codeEnd - index);
-				}
-
-				if (comment.Index < 0 || comment.IsLineComment)
-				{
-					break;
-				}
-
-				int blockEnd = line.IndexOf("*/", comment.Index + 2, StringComparison.Ordinal);
-				if (blockEnd < 0)
-				{
-					inBlockComment = true;
-					break;
-				}
-
-				index = blockEnd + 2;
+				ApplyScintillaSemanticStyleSpan(lineIndex, line, span);
 			}
 		}
 	}
 
-	private void ApplyScintillaSemanticStylesToCodeSegment(int lineIndex, string line, int segmentStart, int segmentLength)
+	private void ApplyScintillaSemanticStyleSpan(int lineIndex, string line, CodeTokenStyleSpan span)
 	{
-		if (_codeEditor == null || segmentLength <= 0)
+		if (_codeEditor == null || span.Length <= 0)
 		{
 			return;
 		}
 
-		string segment = line.Substring(segmentStart, segmentLength);
-		foreach (CodeTokenStyleSpan span in BuildCodeSemanticStyleSpans(segment))
+		int style = GetScintillaStyleForCodeKind(span.Kind);
+		if (style < 0)
 		{
-			int sourceStart = segmentStart + span.Start;
-			if (sourceStart < 0 || sourceStart >= line.Length)
-			{
-				continue;
-			}
+			return;
+		}
 
-			int start = GetScintillaLinePositionFromCharIndex(lineIndex, line, sourceStart);
-			int safeLength = Math.Min(span.Length, line.Length - sourceStart);
-			int length = Encoding.UTF8.GetByteCount(line.Substring(sourceStart, safeLength));
-			int style = span.Kind == CodeTokenVisualKind.ParameterName
-				? ScintillaStyleParameterName
-				: ScintillaStyleFunctionName;
-			if (length <= 0 || start < 0 || start >= _codeEditor.TextLength)
-			{
-				continue;
-			}
+		int sourceStart = span.Start;
+		if (sourceStart < 0 || sourceStart >= line.Length)
+		{
+			return;
+		}
 
-			try
+		int start = GetScintillaLinePositionFromCharIndex(lineIndex, line, sourceStart);
+		int safeLength = Math.Min(span.Length, line.Length - sourceStart);
+		int length = Encoding.UTF8.GetByteCount(line.Substring(sourceStart, safeLength));
+		if (length <= 0 || start < 0 || start >= _codeEditor.TextLength)
+		{
+			return;
+		}
+
+		try
+		{
+			_codeEditor.StartStyling(start);
+			_codeEditor.SetStyling(Math.Min(length, _codeEditor.TextLength - start), style);
+		}
+		catch (Exception ex)
+		{
+			DateTime now = DateTime.UtcNow;
+			if ((now - _lastInlineValueStyleLogUtc).TotalSeconds >= 30)
 			{
-				_codeEditor.StartStyling(start);
-				_codeEditor.SetStyling(Math.Min(length, _codeEditor.TextLength - start), style);
-			}
-			catch (Exception ex)
-			{
-				DateTime now = DateTime.UtcNow;
-				if ((now - _lastInlineValueStyleLogUtc).TotalSeconds >= 30)
-				{
-					_lastInlineValueStyleLogUtc = now;
-					Log("代码样式刷新失败：" + ex.Message);
-				}
+				_lastInlineValueStyleLogUtc = now;
+				Log("代码样式刷新失败：" + ex.Message);
 			}
 		}
+	}
+
+	private static int GetScintillaStyleForCodeKind(CodeTokenVisualKind kind)
+	{
+		return kind switch
+		{
+			CodeTokenVisualKind.Keyword => ScintillaNET.Style.Cpp.Word,
+			CodeTokenVisualKind.Preprocessor => ScintillaNET.Style.Cpp.Preprocessor,
+			CodeTokenVisualKind.Comment => ScintillaNET.Style.Cpp.CommentLine,
+			CodeTokenVisualKind.StringLiteral => ScintillaNET.Style.Cpp.String,
+			CodeTokenVisualKind.NumberLiteral => ScintillaNET.Style.Cpp.Number,
+			CodeTokenVisualKind.FunctionName => ScintillaStyleFunctionName,
+			CodeTokenVisualKind.ParameterName => ScintillaStyleParameterName,
+			_ => -1
+		};
 	}
 
 	private void ApplyScintillaRuntimeHighlights(IReadOnlyList<CodeLineRender> renderedLines, FunctionSourceView renderSource)
@@ -18384,6 +18373,7 @@ public sealed partial class MainForm : Form
 		AppendRtfColor(builder, _surface);
 		AppendRtfColor(builder, _programSearchLineBackColor);
 		AppendRtfColor(builder, _programSearchMatchBackColor);
+		AppendRtfColor(builder, _codeValueColor);
 		builder.Append('}');
 		builder.Append(@"\viewkind4\uc1\pard\f0\fs");
 		builder.Append(Math.Max(16, (int)Math.Round(targetBox.Font.SizeInPoints * 2)));
@@ -18501,53 +18491,68 @@ public sealed partial class MainForm : Form
 
 	private void AppendHighlightedCodeRtf(StringBuilder builder, string text, ref bool inBlockComment, int lineHighlightIndex = 0)
 	{
+		List<CodeTokenStyleSpan> styleSpans = BuildCodeSyntaxStyleSpans(text, ref inBlockComment);
+		AppendStyledCodeRtf(builder, text, styleSpans, lineHighlightIndex);
+	}
+
+	private void AppendStyledCodeRtf(StringBuilder builder, string text, IReadOnlyList<CodeTokenStyleSpan> styleSpans, int lineHighlightIndex)
+	{
 		int index = 0;
+		int spanIndex = 0;
 		while (index < text.Length)
 		{
-			if (inBlockComment)
+			while (spanIndex < styleSpans.Count && styleSpans[spanIndex].Start + styleSpans[spanIndex].Length <= index)
 			{
-				int end = text.IndexOf("*/", index, StringComparison.Ordinal);
-				if (end < 0)
-				{
-					AppendRtfText(builder, text.Substring(index), 4);
-					return;
-				}
+				spanIndex++;
+			}
 
-				AppendRtfText(builder, text.Substring(index, end - index + 2), 4);
-				index = end + 2;
-				inBlockComment = false;
+			if (spanIndex < styleSpans.Count && styleSpans[spanIndex].Start <= index)
+			{
+				CodeTokenStyleSpan span = styleSpans[spanIndex];
+				int spanEnd = Math.Min(text.Length, span.Start + span.Length);
+				AppendRtfText(builder, text.Substring(index, spanEnd - index), GetRtfColorIndexForCodeKind(span.Kind), 0, lineHighlightIndex);
+				index = spanEnd;
 				continue;
 			}
 
-			CommentStart comment = FindNextCommentStart(text, index);
-			int codeEnd = comment.Index >= 0 ? comment.Index : text.Length;
-			if (codeEnd > index)
+			if (TryAppendInlineValueRtf(builder, text, index, lineHighlightIndex, out int inlineLength))
 			{
-				AppendCodeTokensRtf(builder, text.Substring(index, codeEnd - index), lineHighlightIndex);
+				index += inlineLength;
+				continue;
 			}
 
-			if (comment.Index < 0)
+			int nextStyledStart = spanIndex < styleSpans.Count ? styleSpans[spanIndex].Start : text.Length;
+			int nextInlineStart = text.IndexOf('[', index);
+			int next = nextInlineStart >= 0 && nextInlineStart < nextStyledStart ? nextInlineStart : nextStyledStart;
+			if (next <= index)
 			{
-				return;
+				next = index + 1;
 			}
 
-			if (comment.IsLineComment)
-			{
-				AppendRtfText(builder, text.Substring(comment.Index), 4);
-				return;
-			}
-
-			int blockEnd = text.IndexOf("*/", comment.Index + 2, StringComparison.Ordinal);
-			if (blockEnd < 0)
-			{
-				AppendRtfText(builder, text.Substring(comment.Index), 4);
-				inBlockComment = true;
-				return;
-			}
-
-			AppendRtfText(builder, text.Substring(comment.Index, blockEnd - comment.Index + 2), 4);
-			index = blockEnd + 2;
+			AppendRtfText(builder, text.Substring(index, next - index), 2, 0, lineHighlightIndex);
+			index = next;
 		}
+	}
+
+	private bool TryAppendInlineValueRtf(StringBuilder builder, string text, int index, int lineHighlightIndex, out int length)
+	{
+		length = 0;
+		if (index < 0 || index >= text.Length || text[index] != '[')
+		{
+			return false;
+		}
+
+		int close = text.IndexOf(']', index + 1);
+		if (close <= index || close - index > 32)
+		{
+			return false;
+		}
+
+		int valueHighlightIndex = GetInlineValueHighlightIndex(text, index, lineHighlightIndex);
+		int valueColorIndex = valueHighlightIndex == 8 || valueHighlightIndex == 12 ? 7 : 2;
+		AppendRtfText(builder, text.Substring(index, close - index + 1), valueColorIndex, valueHighlightIndex, lineHighlightIndex);
+		length = close - index + 1;
+		return true;
 	}
 
 	private void AppendCodeTokensRtf(StringBuilder builder, string text, int lineHighlightIndex = 0)
@@ -18711,52 +18716,38 @@ public sealed partial class MainForm : Form
 
 	private void AppendHighlightedCodeText(string text, ref bool inBlockComment)
 	{
+		List<CodeTokenStyleSpan> styleSpans = BuildCodeSyntaxStyleSpans(text, ref inBlockComment);
+		AppendStyledCodeText(text, styleSpans);
+	}
+
+	private void AppendStyledCodeText(string text, IReadOnlyList<CodeTokenStyleSpan> styleSpans)
+	{
 		int index = 0;
+		int spanIndex = 0;
 		while (index < text.Length)
 		{
-			if (inBlockComment)
+			while (spanIndex < styleSpans.Count && styleSpans[spanIndex].Start + styleSpans[spanIndex].Length <= index)
 			{
-				int end = text.IndexOf("*/", index, StringComparison.Ordinal);
-				if (end < 0)
-				{
-					AppendCodeText(text.Substring(index), _codeCommentColor);
-					return;
-				}
+				spanIndex++;
+			}
 
-				AppendCodeText(text.Substring(index, end - index + 2), _codeCommentColor);
-				index = end + 2;
-				inBlockComment = false;
+			if (spanIndex < styleSpans.Count && styleSpans[spanIndex].Start <= index)
+			{
+				CodeTokenStyleSpan span = styleSpans[spanIndex];
+				int spanEnd = Math.Min(text.Length, span.Start + span.Length);
+				AppendCodeText(text.Substring(index, spanEnd - index), GetCodeColorForKind(span.Kind));
+				index = spanEnd;
 				continue;
 			}
 
-			CommentStart comment = FindNextCommentStart(text, index);
-			int codeEnd = comment.Index >= 0 ? comment.Index : text.Length;
-			if (codeEnd > index)
+			int next = spanIndex < styleSpans.Count ? styleSpans[spanIndex].Start : text.Length;
+			if (next <= index)
 			{
-				AppendCodeTokens(text.Substring(index, codeEnd - index));
+				next = index + 1;
 			}
 
-			if (comment.Index < 0)
-			{
-				return;
-			}
-
-			if (comment.IsLineComment)
-			{
-				AppendCodeText(text.Substring(comment.Index), _codeCommentColor);
-				return;
-			}
-
-			int blockEnd = text.IndexOf("*/", comment.Index + 2, StringComparison.Ordinal);
-			if (blockEnd < 0)
-			{
-				AppendCodeText(text.Substring(comment.Index), _codeCommentColor);
-				inBlockComment = true;
-				return;
-			}
-
-			AppendCodeText(text.Substring(comment.Index, blockEnd - comment.Index + 2), _codeCommentColor);
-			index = blockEnd + 2;
+			AppendCodeText(text.Substring(index, next - index), _ink);
+			index = next;
 		}
 	}
 
@@ -18859,14 +18850,97 @@ public sealed partial class MainForm : Form
 		return new CommentStart(-1, false);
 	}
 
-	private static List<CodeTokenStyleSpan> BuildCodeSemanticStyleSpans(string text)
+	private static List<CodeTokenStyleSpan> BuildCodeSyntaxStyleSpans(string text, ref bool inBlockComment)
 	{
 		var spans = new List<CodeTokenStyleSpan>();
-		List<CodeTokenStyleSpan> parameterSpans = BuildFunctionParameterNameSpans(text);
+		if (string.IsNullOrEmpty(text))
+		{
+			return spans;
+		}
+
+		var codeMask = new StringBuilder(text);
+		int firstNonWhite = SkipWhitespace(text, 0);
+		if (firstNonWhite < text.Length && text[firstNonWhite] == '#')
+		{
+			int directiveEnd = ReadPreprocessorDirectiveEnd(text, firstNonWhite + 1);
+			AddStyleSpan(spans, firstNonWhite, Math.Max(1, directiveEnd - firstNonWhite), CodeTokenVisualKind.Preprocessor);
+		}
+
 		int index = 0;
 		while (index < text.Length)
 		{
-			if (!IsIdentifierStart(text[index]))
+			if (inBlockComment)
+			{
+				int end = text.IndexOf("*/", index, StringComparison.Ordinal);
+				int length = end < 0 ? text.Length - index : end - index + 2;
+				AddStyleSpan(spans, index, length, CodeTokenVisualKind.Comment);
+				MaskRange(codeMask, index, length);
+				if (end < 0)
+				{
+					return SortCodeStyleSpans(spans);
+				}
+
+				index = end + 2;
+				inBlockComment = false;
+				continue;
+			}
+
+			char c = text[index];
+			char next = index + 1 < text.Length ? text[index + 1] : '\0';
+			if (c == '/' && next == '/')
+			{
+				int length = text.Length - index;
+				AddStyleSpan(spans, index, length, CodeTokenVisualKind.Comment);
+				MaskRange(codeMask, index, length);
+				break;
+			}
+
+			if (c == '/' && next == '*')
+			{
+				int end = text.IndexOf("*/", index + 2, StringComparison.Ordinal);
+				int length = end < 0 ? text.Length - index : end - index + 2;
+				AddStyleSpan(spans, index, length, CodeTokenVisualKind.Comment);
+				MaskRange(codeMask, index, length);
+				if (end < 0)
+				{
+					inBlockComment = true;
+					break;
+				}
+
+				index = end + 2;
+				continue;
+			}
+
+			if (c == '"' || c == '\'')
+			{
+				int end = ReadQuotedLiteralEnd(text, index, c);
+				int length = Math.Max(1, end - index);
+				AddStyleSpan(spans, index, length, CodeTokenVisualKind.StringLiteral);
+				MaskRange(codeMask, index, length);
+				index += length;
+				continue;
+			}
+
+			index++;
+		}
+
+		string masked = codeMask.ToString();
+		List<CodeTokenStyleSpan> parameterSpans = BuildFunctionParameterNameSpans(masked);
+		index = 0;
+		while (index < masked.Length)
+		{
+			if (IsNumberLiteralStart(masked, index))
+			{
+				int end = ReadNumberLiteralEnd(masked, index);
+				if (end > index)
+				{
+					AddStyleSpanIfUncovered(spans, index, end - index, CodeTokenVisualKind.NumberLiteral);
+					index = end;
+					continue;
+				}
+			}
+
+			if (!IsIdentifierStart(masked[index]))
 			{
 				index++;
 				continue;
@@ -18874,29 +18948,388 @@ public sealed partial class MainForm : Form
 
 			int start = index;
 			index++;
-			while (index < text.Length && IsIdentifierChar(text[index]))
+			while (index < masked.Length && IsIdentifierChar(masked[index]))
 			{
 				index++;
 			}
 
-			string token = text.Substring(start, index - start);
+			string token = masked.Substring(start, index - start);
+			CodeTokenVisualKind kind = CodeTokenVisualKind.Normal;
 			if (IsCKeywordToken(token))
 			{
-				continue;
+				kind = CodeTokenVisualKind.Keyword;
+			}
+			else
+			{
+				CodeTokenVisualKind parameterKind = FindCodeTokenVisualKind(parameterSpans, start, index - start);
+				if (parameterKind == CodeTokenVisualKind.ParameterName)
+				{
+					kind = CodeTokenVisualKind.ParameterName;
+				}
+				else if (LooksLikeFunctionCall(masked, index))
+				{
+					kind = CodeTokenVisualKind.FunctionName;
+				}
 			}
 
-			CodeTokenVisualKind parameterKind = FindCodeTokenVisualKind(parameterSpans, start, index - start);
-			if (parameterKind == CodeTokenVisualKind.ParameterName)
+			if (kind != CodeTokenVisualKind.Normal)
 			{
-				spans.Add(new CodeTokenStyleSpan(start, index - start, CodeTokenVisualKind.ParameterName));
-			}
-			else if (LooksLikeFunctionCall(text, index))
-			{
-				spans.Add(new CodeTokenStyleSpan(start, index - start, CodeTokenVisualKind.FunctionName));
+				AddStyleSpanIfUncovered(spans, start, index - start, kind);
 			}
 		}
 
-		return spans;
+		return SortCodeStyleSpans(spans);
+	}
+
+	private static List<CodeTokenStyleSpan> BuildCodeSemanticStyleSpans(string text)
+	{
+		bool inBlockComment = false;
+		return BuildCodeSyntaxStyleSpans(text, ref inBlockComment)
+			.Where(span => span.Kind == CodeTokenVisualKind.FunctionName || span.Kind == CodeTokenVisualKind.ParameterName)
+			.ToList();
+	}
+
+	private static int ReadPreprocessorDirectiveEnd(string text, int index)
+	{
+		int i = SkipWhitespace(text, index);
+		while (i < text.Length && IsIdentifierChar(text[i]))
+		{
+			i++;
+		}
+
+		return Math.Max(index, i);
+	}
+
+	private static int ReadQuotedLiteralEnd(string text, int index, char quote)
+	{
+		int i = index + 1;
+		bool escape = false;
+		while (i < text.Length)
+		{
+			char c = text[i++];
+			if (escape)
+			{
+				escape = false;
+				continue;
+			}
+
+			if (c == '\\')
+			{
+				escape = true;
+				continue;
+			}
+
+			if (c == quote)
+			{
+				break;
+			}
+		}
+
+		return i;
+	}
+
+	private static bool IsNumberLiteralStart(string text, int index)
+	{
+		if (index < 0 || index >= text.Length)
+		{
+			return false;
+		}
+
+		char c = text[index];
+		if (char.IsDigit(c))
+		{
+			return index == 0 || !IsIdentifierChar(text[index - 1]);
+		}
+
+		return c == '.' &&
+			index + 1 < text.Length &&
+			char.IsDigit(text[index + 1]) &&
+			(index == 0 || !IsIdentifierChar(text[index - 1]));
+	}
+
+	private static int ReadNumberLiteralEnd(string text, int index)
+	{
+		int i = index;
+		if (i + 1 < text.Length && text[i] == '0' && (text[i + 1] == 'x' || text[i + 1] == 'X'))
+		{
+			i += 2;
+			while (i < text.Length && IsHexDigit(text[i]))
+			{
+				i++;
+			}
+		}
+		else
+		{
+			bool sawExponent = false;
+			while (i < text.Length)
+			{
+				char c = text[i];
+				if (char.IsDigit(c) || c == '.')
+				{
+					i++;
+					continue;
+				}
+
+				if ((c == 'e' || c == 'E') && !sawExponent)
+				{
+					sawExponent = true;
+					i++;
+					if (i < text.Length && (text[i] == '+' || text[i] == '-'))
+					{
+						i++;
+					}
+					continue;
+				}
+
+				break;
+			}
+		}
+
+		while (i < text.Length && "uUlLfF".IndexOf(text[i]) >= 0)
+		{
+			i++;
+		}
+
+		return i;
+	}
+
+	private static bool IsHexDigit(char c)
+	{
+		return char.IsDigit(c) ||
+			(c >= 'a' && c <= 'f') ||
+			(c >= 'A' && c <= 'F');
+	}
+
+	private static void MaskRange(StringBuilder builder, int start, int length)
+	{
+		int end = Math.Min(builder.Length, start + Math.Max(0, length));
+		for (int i = Math.Max(0, start); i < end; i++)
+		{
+			builder[i] = char.IsWhiteSpace(builder[i]) ? builder[i] : ' ';
+		}
+	}
+
+	private static void AddStyleSpan(List<CodeTokenStyleSpan> spans, int start, int length, CodeTokenVisualKind kind)
+	{
+		if (start < 0 || length <= 0)
+		{
+			return;
+		}
+
+		spans.Add(new CodeTokenStyleSpan(start, length, kind));
+	}
+
+	private static void AddStyleSpanIfUncovered(List<CodeTokenStyleSpan> spans, int start, int length, CodeTokenVisualKind kind)
+	{
+		if (start < 0 || length <= 0 || IsStyleSpanCovered(spans, start, length))
+		{
+			return;
+		}
+
+		spans.Add(new CodeTokenStyleSpan(start, length, kind));
+	}
+
+	private static bool IsStyleSpanCovered(IReadOnlyList<CodeTokenStyleSpan> spans, int start, int length)
+	{
+		int end = start + length;
+		foreach (CodeTokenStyleSpan span in spans)
+		{
+			int spanEnd = span.Start + span.Length;
+			if (span.Start < end && start < spanEnd)
+			{
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	private static List<CodeTokenStyleSpan> SortCodeStyleSpans(List<CodeTokenStyleSpan> spans)
+	{
+		return spans
+			.OrderBy(span => span.Start)
+			.ThenByDescending(span => span.Length)
+			.ToList();
+	}
+
+	private static int GetRtfColorIndexForCodeKind(CodeTokenVisualKind kind)
+	{
+		return kind switch
+		{
+			CodeTokenVisualKind.Keyword => 6,
+			CodeTokenVisualKind.Preprocessor => 6,
+			CodeTokenVisualKind.Comment => 4,
+			CodeTokenVisualKind.StringLiteral => 15,
+			CodeTokenVisualKind.NumberLiteral => 15,
+			CodeTokenVisualKind.FunctionName => 5,
+			CodeTokenVisualKind.ParameterName => 3,
+			_ => 2
+		};
+	}
+
+	private Color GetCodeColorForKind(CodeTokenVisualKind kind)
+	{
+		return kind switch
+		{
+			CodeTokenVisualKind.Keyword => _codeKeywordColor,
+			CodeTokenVisualKind.Preprocessor => _codeKeywordColor,
+			CodeTokenVisualKind.Comment => _codeCommentColor,
+			CodeTokenVisualKind.StringLiteral => _codeValueColor,
+			CodeTokenVisualKind.NumberLiteral => _codeValueColor,
+			CodeTokenVisualKind.FunctionName => _codeFunctionColor,
+			CodeTokenVisualKind.ParameterName => _accent,
+			_ => _ink
+		};
+	}
+
+	internal static int RunSyntaxHighlightSelfTest(TextWriter output)
+	{
+		var failures = new List<string>();
+		var lineResults = new List<(string Line, List<CodeTokenStyleSpan> Spans)>();
+		bool inBlockComment = false;
+		string[] lines =
+		[
+			"#define KEY_VALUE 0x82u",
+			"static uint32_t MyLogic_10ms(int inputValue, const char *name)",
+			"{",
+			"    if (inputValue > 0) { CAN_Send(0x82); } // 中文注释 if return",
+			"    const char *s = \"if return // not comment\";",
+			"    /* block uint32_t",
+			"       return inputValue; */",
+			"    plainValue = inputValue;",
+			"}"
+		];
+
+		foreach (string line in lines)
+		{
+			List<CodeTokenStyleSpan> spans = BuildCodeSyntaxStyleSpans(line, ref inBlockComment);
+			lineResults.Add((line, spans));
+		}
+
+		AssertTokenKind(lineResults, 0, "define", CodeTokenVisualKind.Preprocessor, failures);
+		AssertTokenKind(lineResults, 0, "0x82u", CodeTokenVisualKind.NumberLiteral, failures);
+		AssertTokenKind(lineResults, 1, "static", CodeTokenVisualKind.Keyword, failures);
+		AssertTokenKind(lineResults, 1, "uint32_t", CodeTokenVisualKind.Keyword, failures);
+		AssertTokenKind(lineResults, 1, "MyLogic_10ms", CodeTokenVisualKind.FunctionName, failures);
+		AssertTokenKind(lineResults, 1, "inputValue", CodeTokenVisualKind.ParameterName, failures);
+		AssertTokenKind(lineResults, 1, "name", CodeTokenVisualKind.ParameterName, failures);
+		AssertTokenKind(lineResults, 3, "if", CodeTokenVisualKind.Keyword, failures);
+		AssertTokenKind(lineResults, 3, "CAN_Send", CodeTokenVisualKind.FunctionName, failures);
+		AssertTokenKind(lineResults, 3, "0x82", CodeTokenVisualKind.NumberLiteral, failures);
+		AssertTextKind(lineResults, 3, "// 中文注释", CodeTokenVisualKind.Comment, failures);
+		AssertTextKind(lineResults, 4, "\"if return // not comment\"", CodeTokenVisualKind.StringLiteral, failures);
+		AssertTextKind(lineResults, 5, "/* block uint32_t", CodeTokenVisualKind.Comment, failures);
+		AssertTextKind(lineResults, 6, "return inputValue; */", CodeTokenVisualKind.Comment, failures);
+		AssertNoTokenKind(lineResults, 3, "return", CodeTokenVisualKind.Keyword, failures);
+		AssertNoTokenKind(lineResults, 4, "return", CodeTokenVisualKind.Keyword, failures);
+		AssertNoTokenKind(lineResults, 5, "uint32_t", CodeTokenVisualKind.Keyword, failures);
+		AssertNoTokenKind(lineResults, 6, "return", CodeTokenVisualKind.Keyword, failures);
+
+		foreach (CodeTokenVisualKind kind in new[]
+		{
+			CodeTokenVisualKind.Keyword,
+			CodeTokenVisualKind.Preprocessor,
+			CodeTokenVisualKind.Comment,
+			CodeTokenVisualKind.StringLiteral,
+			CodeTokenVisualKind.NumberLiteral,
+			CodeTokenVisualKind.FunctionName,
+			CodeTokenVisualKind.ParameterName
+		})
+		{
+			if (GetScintillaStyleForCodeKind(kind) < 0)
+			{
+				failures.Add(kind + " 没有 Scintilla 样式映射。");
+			}
+			if (GetRtfColorIndexForCodeKind(kind) == 2)
+			{
+				failures.Add(kind + " 仍映射到普通代码 RTF 颜色。");
+			}
+		}
+
+		if (failures.Count == 0)
+		{
+			output.WriteLine("SyntaxHighlightSelfTest: PASS");
+			output.WriteLine("keywords/comments/strings/numbers/functions/parameters are classified separately.");
+			return 0;
+		}
+
+		output.WriteLine("SyntaxHighlightSelfTest: FAIL");
+		foreach (string failure in failures)
+		{
+			output.WriteLine("- " + failure);
+		}
+		return 2;
+	}
+
+	private static void AssertTokenKind(
+		IReadOnlyList<(string Line, List<CodeTokenStyleSpan> Spans)> lineResults,
+		int lineIndex,
+		string token,
+		CodeTokenVisualKind kind,
+		List<string> failures)
+	{
+		if (!HasTokenKind(lineResults[lineIndex].Line, lineResults[lineIndex].Spans, token, kind))
+		{
+			failures.Add($"第 {lineIndex + 1} 行 token `{token}` 未识别为 {kind}。");
+		}
+	}
+
+	private static void AssertNoTokenKind(
+		IReadOnlyList<(string Line, List<CodeTokenStyleSpan> Spans)> lineResults,
+		int lineIndex,
+		string token,
+		CodeTokenVisualKind kind,
+		List<string> failures)
+	{
+		if (HasTokenKind(lineResults[lineIndex].Line, lineResults[lineIndex].Spans, token, kind))
+		{
+			failures.Add($"第 {lineIndex + 1} 行 token `{token}` 不应识别为 {kind}。");
+		}
+	}
+
+	private static void AssertTextKind(
+		IReadOnlyList<(string Line, List<CodeTokenStyleSpan> Spans)> lineResults,
+		int lineIndex,
+		string text,
+		CodeTokenVisualKind kind,
+		List<string> failures)
+	{
+		string line = lineResults[lineIndex].Line;
+		int start = line.IndexOf(text, StringComparison.Ordinal);
+		if (start < 0 || !HasKindCoveringRange(lineResults[lineIndex].Spans, start, text.Length, kind))
+		{
+			failures.Add($"第 {lineIndex + 1} 行文本 `{text}` 未整体识别为 {kind}。");
+		}
+	}
+
+	private static bool HasTokenKind(string line, IReadOnlyList<CodeTokenStyleSpan> spans, string token, CodeTokenVisualKind kind)
+	{
+		int index = -1;
+		while ((index = line.IndexOf(token, index + 1, StringComparison.Ordinal)) >= 0)
+		{
+			bool leftOk = index == 0 || !IsIdentifierChar(line[index - 1]);
+			bool rightOk = index + token.Length >= line.Length || !IsIdentifierChar(line[index + token.Length]);
+			if (leftOk && rightOk && HasKindCoveringRange(spans, index, token.Length, kind))
+			{
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	private static bool HasKindCoveringRange(IReadOnlyList<CodeTokenStyleSpan> spans, int start, int length, CodeTokenVisualKind kind)
+	{
+		int end = start + length;
+		foreach (CodeTokenStyleSpan span in spans)
+		{
+			if (span.Kind == kind && span.Start <= start && span.Start + span.Length >= end)
+			{
+				return true;
+			}
+		}
+
+		return false;
 	}
 
 	private static List<CodeTokenStyleSpan> BuildFunctionParameterNameSpans(string text)

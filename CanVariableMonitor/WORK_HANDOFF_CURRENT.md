@@ -4,7 +4,7 @@
 
 - GitHub 仓库：`https://github.com/hudonghua/can-variable-monitor.git`
 - 关键词：`上位机监控`
-- 当前源码版本号：`V1.41`
+- 当前源码版本号：`V1.42`
 - 自动更新地址：`http://8.148.250.52:9999/update_manifest.json`
 - F 盘本机测试目录：`F:\工作\AI模型\s上位机\监控上位机\上位机\上位机监控_V1.2_20260612_120554`
 
@@ -70,6 +70,26 @@ can_monitor_latest.zip
 - 代码旁数值显示已经多次调整，后续修改时必须优先保证不闪、不抢焦点、不破坏 Ctrl+C 和滚动手感。
 - 在线模式以控制器真实 RAM 为准，不应被离线 worker 逻辑影响。
 - 版本号近期用于测试在线更新，修改版本时要同步确认服务器 manifest。
+
+## 2026-06-16 V1.42 代码高亮修正
+
+本轮目标是解决“关键词、注释、字符串、函数名、形参和普通代码颜色没有严格区分”的问题。`MainForm.cs` 中的 Scintilla 看代码路径、RTF 调试/离线镜像路径现在共用同一套 C/Keil token 分类器：先识别并遮蔽注释和字符串，再识别真实代码区域里的关键词、预处理指令、数字、函数名和形参，避免 `"if return //"` 或 `// if return` 里的词被误染成代码关键字。
+
+新增自检入口：
+
+```powershell
+.\上位机监控.exe --syntax-highlight-self-test
+```
+
+通过标准：输出 `SyntaxHighlightSelfTest: PASS`，并确认 keyword/comment/string/number/function/parameter 都有非普通代码的样式映射。
+
+本机内测结果：
+
+- `dotnet build .\CanVariableMonitor\CanVariableMonitor.csproj -v:minimal`：通过。
+- `dotnet run --no-build --project .\CanVariableMonitor\CanVariableMonitor.csproj -- --syntax-highlight-self-test`：通过，输出 `SyntaxHighlightSelfTest: PASS`。
+- 发布目录 `.\上位机监控.exe --syntax-highlight-self-test`：通过，退出码 0，并写出 `%APPDATA%\CanVariableMonitor\syntax_highlight_selftest.log`。
+- `OfflineWorkerSelfTest.ps1`：通过，generic app chain advanced 5 ticks。
+- 三个真实工程 `OfflineRealProjectProbe.ps1`：通过；铵油装药车、旭工干喷、华矿二代半液压主控均保持 `__canmon_main_loop_tick` 离线入口和强制分支执行通过。
 
 ## 2026-06-15 离线变量不刷新修正
 
