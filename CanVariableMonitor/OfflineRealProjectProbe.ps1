@@ -198,6 +198,83 @@ function Build-ReachableSources {
     return $sources
 }
 
+function Test-Identifier {
+    param([string]$Name)
+    return -not [string]::IsNullOrWhiteSpace($Name) -and
+        [regex]::IsMatch($Name, '^[A-Za-z_][A-Za-z0-9_]*$') -and
+        -not $cKeywords.Contains($Name)
+}
+
+function Test-FunctionDeclaresVariable {
+    param([string]$Text, [string]$Name)
+    $escaped = [regex]::Escape($Name)
+    $typePattern = '(?:unsigned\s+|signed\s+|short\s+|long\s+)*(?:char|int|float|double|bool|uint|u8|u16|u32|s8|s16|s32|uint8_t|uint16_t|uint32_t|int8_t|int16_t|int32_t|BYTE|WORD|DWORD)'
+    return [regex]::IsMatch(
+        $Text,
+        "(?m)^\s*(?:static\s+|const\s+|volatile\s+|register\s+)*$typePattern\s+[^;]*\b$escaped\b")
+}
+
+function Find-BranchForceCandidates {
+    param([object[]]$Sources)
+    $result = [System.Collections.Generic.List[object]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($source in $Sources) {
+        $lines = @($source.lines)
+        $text = [string]::Join("`n", $lines)
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            $line = [regex]::Replace([string]$lines[$i], '//.*$', '')
+            $condition = [regex]::Match(
+                $line,
+                '^\s*if\s*\(\s*(?<cond>[A-Za-z_][A-Za-z0-9_]*)\s*(?:(?:!=\s*0)|(?:==\s*1)|(?:>\s*0))?\s*\)')
+            if (-not $condition.Success) {
+                continue
+            }
+            $conditionName = $condition.Groups['cond'].Value
+            if (-not (Test-Identifier $conditionName) -or
+                $functionDefs.ContainsKey($conditionName) -or
+                (Test-FunctionDeclaresVariable $text $conditionName)) {
+                continue
+            }
+
+            $max = [Math]::Min($lines.Count - 1, $i + 14)
+            for ($j = $i + 1; $j -le $max; $j++) {
+                $bodyLine = [regex]::Replace([string]$lines[$j], '//.*$', '')
+                if ($bodyLine -match '^\s*else\b') {
+                    break
+                }
+                $assign = [regex]::Match(
+                    $bodyLine,
+                    '^\s*(?<target>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?<value>[1-9][0-9]{0,5})\s*;')
+                if (-not $assign.Success) {
+                    continue
+                }
+                $targetName = $assign.Groups['target'].Value
+                if (-not (Test-Identifier $targetName) -or
+                    $targetName.Equals($conditionName, [System.StringComparison]::OrdinalIgnoreCase) -or
+                    $functionDefs.ContainsKey($targetName) -or
+                    (Test-FunctionDeclaresVariable $text $targetName)) {
+                    continue
+                }
+                $key = "$($source.functionName)|$conditionName|$targetName"
+                if (-not $seen.Add($key)) {
+                    continue
+                }
+                $result.Add([ordered]@{
+                    functionName = $source.functionName
+                    filePath = $source.filePath
+                    line = [int]$source.startLine + $i
+                    condition = $conditionName
+                    target = $targetName
+                    forceValue = 1
+                    expectedValue = [uint32]$assign.Groups['value'].Value
+                })
+                break
+            }
+        }
+    }
+    return $result
+}
+
 function New-SmokeVariable {
     param([string]$Name, [uint32]$Address)
     return [ordered]@{
@@ -210,6 +287,29 @@ function New-SmokeVariable {
         forceActive = $false
         aliases = @($Name)
     }
+}
+
+function New-WorkerWritePayload {
+    param([string]$Name, [uint32]$Value)
+    return [ordered]@{
+        key = $Name
+        name = $Name
+        rawValue = $Value
+        size = 4
+    }
+}
+
+function Get-WorkerValue {
+    param([object]$Response, [string]$Key)
+    if ($null -eq $Response -or $null -eq $Response.values) {
+        return $null
+    }
+    foreach ($property in $Response.values.PSObject.Properties) {
+        if ($property.Name.Equals($Key, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return [uint32]$property.Value
+        }
+    }
+    return $null
 }
 
 function Start-Worker {
@@ -258,10 +358,20 @@ if ($sources.Count -eq 0) {
     throw "No reachable application sources from roots: $($roots -join ', ')"
 }
 
-$variables = @((New-SmokeVariable "__offline_smoke_value" 1))
+$branchCandidates = @(Find-BranchForceCandidates $sources | Select-Object -First 24)
+if ($branchCandidates.Count -eq 0) {
+    throw "No forceable branch candidate was discovered in reachable application sources."
+}
 
-$process = Start-Worker
-try {
+$branchPassed = $false
+$branchSummary = ""
+$lastBranchError = ""
+foreach ($branch in $branchCandidates) {
+    $variables = @(
+        (New-SmokeVariable "__offline_smoke_value" 1),
+        (New-SmokeVariable $branch.condition 2),
+        (New-SmokeVariable $branch.target 3)
+    )
     $project = [ordered]@{
         workDirectory = $ProjectSrc
         signature = "real-project-auto-app-smoke"
@@ -269,25 +379,71 @@ try {
         sources = $sources
         variables = $variables
     }
-    $init = Send-WorkerCommand $process "InitProject" $project
-    if (-not [bool]$init.ok) {
-        throw "InitProject failed: $($init.status)"
+    $process = Start-Worker
+    try {
+        $init = Send-WorkerCommand $process "InitProject" $project
+        if (-not [bool]$init.ok) {
+            throw "InitProject failed: $($init.status)"
+        }
+        $baselineRun = Send-WorkerCommand $process "RunTick" $null
+        if (-not [bool]$baselineRun.ok) {
+            throw "RunTick failed: $($baselineRun.status)"
+        }
+        $baselineTarget = Get-WorkerValue $baselineRun $branch.target
+        if ($null -eq $baselineTarget) {
+            throw "Baseline snapshot did not include $($branch.target)."
+        }
+        if ([uint32]$baselineTarget -ne 0) {
+            $lastBranchError = "Candidate $($branch.condition) -> $($branch.target) skipped: baseline target was $baselineTarget."
+            continue
+        }
+
+        $force = Send-WorkerCommand $process "ForceVariable" (New-WorkerWritePayload $branch.condition ([uint32]$branch.forceValue))
+        if (-not [bool]$force.ok) {
+            throw "ForceVariable failed: $($force.status)"
+        }
+        $forcedRun = Send-WorkerCommand $process "RunTick" $null
+        if (-not [bool]$forcedRun.ok) {
+            throw "Forced RunTick failed: $($forcedRun.status)"
+        }
+        $forcedTarget = Get-WorkerValue $forcedRun $branch.target
+        if ($null -eq $forcedTarget) {
+            throw "Forced snapshot did not include $($branch.target)."
+        }
+        $expected = [uint32]$branch.expectedValue
+        $forced = [uint32]$forcedTarget
+        $branchExecuted =
+            $forced -eq $expected -or
+            ($expected -gt 1 -and $forced -gt 0 -and $forced -le $expected)
+        if (-not $branchExecuted) {
+            $lastBranchError = "Candidate $($branch.condition) -> $($branch.target) expected $($branch.expectedValue), got $forcedTarget."
+            continue
+        }
+
+        $coverage = [string]::Join("`n", @($init.coverage) + @($baselineRun.coverage) + @($forcedRun.coverage))
+        if ($coverage -match "业务调用被 stub") {
+            Write-Warning "Some unresolved business calls remain:`n$coverage"
+        }
+        $branchSummary = "$($branch.condition)=$($branch.forceValue) -> $($branch.target)=$forcedTarget at $($branch.functionName):$($branch.line)"
+        $branchPassed = $true
+        break
     }
-    $run = Send-WorkerCommand $process "RunTick" $null
-    if (-not [bool]$run.ok) {
-        throw "RunTick failed: $($run.status)"
+    catch {
+        $lastBranchError = $_.Exception.Message
     }
-    $coverage = [string]::Join("`n", @($init.coverage) + @($run.coverage))
-    if ($coverage -match "业务调用被 stub") {
-        Write-Warning "Some unresolved business calls remain:`n$coverage"
+    finally {
+        try { [void](Send-WorkerCommand $process "Shutdown" $null 5000) } catch {}
+        if ($process -and -not $process.HasExited) {
+            try { $process.Kill() } catch {}
+        }
     }
-    Write-Host "Real project offline smoke passed."
-    Write-Host "Roots: $($roots -join ', ')"
-    Write-Host "Application sources: $($sources.Count); smoke variables: $($variables.Count)"
 }
-finally {
-    try { [void](Send-WorkerCommand $process "Shutdown" $null 5000) } catch {}
-    if ($process -and -not $process.HasExited) {
-        try { $process.Kill() } catch {}
-    }
+
+if (-not $branchPassed) {
+    throw "Force branch check failed after $($branchCandidates.Count) candidates. Last: $lastBranchError"
 }
+
+Write-Host "Real project offline smoke passed."
+Write-Host "Roots: $($roots -join ', ')"
+Write-Host "Application sources: $($sources.Count); smoke variables: 3"
+Write-Host "Force branch check passed: $branchSummary"

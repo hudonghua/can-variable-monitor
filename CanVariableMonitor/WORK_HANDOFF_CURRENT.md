@@ -4,7 +4,7 @@
 
 - GitHub 仓库：`https://github.com/hudonghua/can-variable-monitor.git`
 - 关键词：`上位机监控`
-- 当前源码版本号：`V1.0`
+- 当前源码版本号：`V1.3`
 - 自动更新地址：`http://8.148.250.52:9999/update_manifest.json`
 - F 盘本机测试目录：`F:\工作\AI模型\s上位机\监控上位机\上位机\上位机监控_V1.2_20260612_120554`
 
@@ -56,6 +56,16 @@ can_monitor_latest.zip
 - 湿喷机：`E:\AI_划时代\T天腾\湿喷机\MC_LCD - 7Control_V3.0dev210919_JJ` 通过；自动入口 `MyLogic_10ms, work_logic, qiangzhi_work_Frame`；应用层源码 29 个。
 
 本轮针对内测暴露的问题做了通用修复：常见数学函数由临时 `keil_compat.h` 提供；unresolved 底层函数使用可吞任意参数的 stub 宏；自动入口过滤带参数函数；默认 0 mock 导致的除法/取模分母为 0 时加仿真保护并记录未覆盖诊断。
+
+## 2026-06-15 V1.3 离线强制变量内测
+
+本轮 `OfflineRealProjectProbe.ps1` 已从普通 smoke 升级为真实分支验证：自动找应用层 `if` 分支，baseline 目标变量为 0，再通过 `ForceVariable` 强制条件变量，确认分支内目标变量变为非 0 合理值。
+
+- 铵油装药车编码器铁轮版：`E:\AI_划时代\T天腾\C采矿装药车\铵油装药车\中深孔修改后\江南爆破中深孔\速度为设置编码器铁轮\MC_LCD - 7Control_V1.2` 通过；入口 `work_logic, MyLogic_10ms, walk_logic`；应用层源码 21 个；强制 `Local_Control_Mode=1` 后 `CAN1_119_Walk_Power_DO=1`。
+- 旭工干喷：`E:\AI_划时代\旭工\干喷\程序\显示屏7-200\MC_LCD - 7Control_V1.2` 通过；入口 `MyLogic_10ms, Public_Logic_, work_logic_CAN2`；应用层源码 17 个；强制 `Main_Pump_Current_up_DI=1` 后 `Paramet_Set1=10`。
+- 华矿二代半液压主控：`E:\AI_划时代\H华矿\华旷二代半液压\二代半液压\主控\主控\主控` 通过；入口 `work_logic, MyLogic_10ms, Tube_logic_data`；应用层源码 43 个；强制 `Hydraulic_Temperature_control_DI=1` 后 `Hydraulic_Temperature_control_DI_dly=499`。
+
+本轮针对华矿主控暴露的问题做了通用修复：安全除法分母分为浮点和整型，整型表达式后续参与 `>>`/`<<` 时不再被浮点化。
 
 ## 当前已知风险
 

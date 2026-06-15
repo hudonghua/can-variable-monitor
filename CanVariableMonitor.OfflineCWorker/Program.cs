@@ -1237,7 +1237,14 @@ internal static class SimulationCGenerator
         string normalized = Regex.Replace(
             line,
             @"(?<!/)/(?!/)\s*(?<den>[A-Za-z_][A-Za-z0-9_]*\s*\([^;\r\n]*?\)|\([^;\r\n]*?\)|[0-9]+(?:\.[0-9]+)?|[A-Za-z_][A-Za-z0-9_]*)",
-            "/ __canmon_safe_den(${den})");
+            match =>
+            {
+                string denominator = match.Groups["den"].Value;
+                string helper = LooksLikeFloatingDenominator(denominator)
+                    ? "__canmon_safe_den"
+                    : "__canmon_safe_den_i64";
+                return "/ " + helper + "(" + denominator + ")";
+            });
         normalized = Regex.Replace(
             normalized,
             @"%\s*(?<den>[A-Za-z_][A-Za-z0-9_]*\s*\([^;\r\n]*?\)|\([^;\r\n]*?\)|[0-9]+(?:\.[0-9]+)?|[A-Za-z_][A-Za-z0-9_]*)",
@@ -1247,6 +1254,11 @@ internal static class SimulationCGenerator
             coverageNotes.Add("离线未覆盖：除法/取模分母已加零值保护（" + source.FunctionName + "）。");
         }
         return normalized;
+    }
+
+    private static bool LooksLikeFloatingDenominator(string denominator)
+    {
+        return Regex.IsMatch(denominator, @"\d+\.\d+");
     }
 
     private static string NormalizeComplexAccess(string line, OfflineWorkerSourcePayload source, ISet<string> coverageNotes)

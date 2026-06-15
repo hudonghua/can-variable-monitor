@@ -40,7 +40,7 @@ internal sealed class LPC1765_Keil_AppStubPack
         "sin", "cos", "tan", "atan", "fabs", "sqrt", "floor", "ceil",
         "__canmon_abs", "__canmon_fabs", "__canmon_sin", "__canmon_cos", "__canmon_tan",
         "__canmon_atan", "__canmon_sqrt", "__canmon_floor", "__canmon_ceil",
-        "__canmon_safe_den", "__canmon_safe_mod_den"
+        "__canmon_safe_den", "__canmon_safe_den_i64", "__canmon_safe_mod_den"
     };
 
     private readonly string[] _excludedDirectoryNames =
@@ -143,6 +143,7 @@ internal sealed class LPC1765_Keil_AppStubPack
         "static double __canmon_floor(double x) { long long i = (long long)x; return (double)((x < 0.0 && (double)i != x) ? i - 1 : i); }",
         "static double __canmon_ceil(double x) { long long i = (long long)x; return (double)((x > 0.0 && (double)i != x) ? i + 1 : i); }",
         "static double __canmon_safe_den(double x) { return __canmon_fabs(x) < 0.000001 ? 1.0 : x; }",
+        "static long long __canmon_safe_den_i64(long long x) { return x == 0 ? 1 : x; }",
         "static long long __canmon_safe_mod_den(long long x) { return x == 0 ? 1 : x; }",
         "#define abs(x) __canmon_abs((long long)(x))",
         "#define labs(x) __canmon_abs((long long)(x))",
