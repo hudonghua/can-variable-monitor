@@ -433,7 +433,7 @@ internal static class Program
     private static string CompactError(string text)
     {
         string clean = Regex.Replace(text.Trim(), @"\s+", " ");
-        return clean.Length <= 240 ? clean : clean[..240];
+        return clean.Length <= 900 ? clean : clean[..900];
     }
 
     private static string SanitizePathPart(string text)
@@ -568,6 +568,7 @@ internal static class SimulationCGenerator
         {
             _lastCoverageNotes.Add("离线未覆盖：底层源码未参与编译，相关调用自动 stub/mock：" + string.Join(", ", excludedSourceNames));
         }
+        HashSet<string> caseConstantNames = CollectCaseConstantIdentifiers(appSources.Select(item => item.Text));
 
         HashSet<string> definedFunctionNames = appSources
             .Where(item => SourceDefinesFunction(item.Source, item.Text))
@@ -602,6 +603,7 @@ internal static class SimulationCGenerator
             sourceFunctionNames,
             calledFunctions,
             externalTypeNames);
+        externalScalars.ExceptWith(caseConstantNames);
 
         foreach (string typeName in externalTypeNames.OrderBy(name => name, StringComparer.OrdinalIgnoreCase))
         {
@@ -624,6 +626,8 @@ internal static class SimulationCGenerator
         {
             builder.AppendLine();
         }
+
+        AppendCaseConstantDefines(builder, caseConstantNames);
 
         builder.AppendLine("extern int printf(const char*, ...);");
         builder.AppendLine();
@@ -649,7 +653,7 @@ internal static class SimulationCGenerator
 
             foreach (string alias in variable.Aliases.Where(IsValidIdentifier).Distinct(StringComparer.OrdinalIgnoreCase))
             {
-                if (SupportPack.IsCKeyword(alias) || aliasToStorage.ContainsKey(alias))
+                if (SupportPack.IsCKeyword(alias) || aliasToStorage.ContainsKey(alias) || caseConstantNames.Contains(alias))
                 {
                     continue;
                 }
@@ -1400,6 +1404,88 @@ internal static class SimulationCGenerator
             }
         }
         return types;
+    }
+
+    private static HashSet<string> CollectCaseConstantIdentifiers(IEnumerable<string> sanitizedSources)
+    {
+        var constants = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string source in sanitizedSources)
+        {
+            foreach (Match caseMatch in Regex.Matches(source, @"(?m)^\s*case\s+(?<expr>[^:]+):"))
+            {
+                string expression = caseMatch.Groups["expr"].Value;
+                foreach (Match identifier in Regex.Matches(expression, @"\b[A-Za-z_][A-Za-z0-9_]*\b"))
+                {
+                    string name = identifier.Value;
+                    if (!IsValidIdentifier(name) ||
+                        SupportPack.IsCKeyword(name) ||
+                        SupportPack.IsKnownTypeName(name))
+                    {
+                        continue;
+                    }
+
+                    int after = identifier.Index + identifier.Length;
+                    while (after < expression.Length && char.IsWhiteSpace(expression[after]))
+                    {
+                        after++;
+                    }
+                    if (after < expression.Length && expression[after] == '(')
+                    {
+                        continue;
+                    }
+
+                    constants.Add(name);
+                }
+            }
+        }
+        return constants;
+    }
+
+    private static void AppendCaseConstantDefines(StringBuilder builder, IReadOnlyCollection<string> caseConstantNames)
+    {
+        if (caseConstantNames.Count == 0)
+        {
+            return;
+        }
+
+        int ordinal = 1;
+        foreach (string name in caseConstantNames.OrderBy(name => name, StringComparer.OrdinalIgnoreCase))
+        {
+            builder.Append("#ifndef ");
+            builder.AppendLine(name);
+            builder.Append("#define ");
+            builder.Append(name);
+            builder.Append(' ');
+            builder.Append(InferCaseConstantValue(name, ordinal).ToString(CultureInfo.InvariantCulture));
+            builder.AppendLine();
+            builder.Append("#endif");
+            builder.AppendLine();
+            ordinal++;
+        }
+        builder.AppendLine();
+        _lastCoverageNotes.Add("离线覆盖：case 宏/枚举常量已临时定义 " +
+            string.Join(", ", caseConstantNames.OrderBy(name => name, StringComparer.OrdinalIgnoreCase).Take(12)));
+    }
+
+    private static long InferCaseConstantValue(string name, int ordinal)
+    {
+        Match keyMatch = Regex.Match(name, @"(?:^|_)(?:F|KEY|K)(?<num>[0-9]+)$", RegexOptions.IgnoreCase);
+        if (keyMatch.Success &&
+            int.TryParse(keyMatch.Groups["num"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int keyNumber) &&
+            keyNumber >= 1 &&
+            keyNumber <= 30)
+        {
+            return 1L << (keyNumber - 1);
+        }
+
+        Match trailingNumber = Regex.Match(name, @"(?<num>[0-9]+)$");
+        if (trailingNumber.Success &&
+            int.TryParse(trailingNumber.Groups["num"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int value))
+        {
+            return value;
+        }
+
+        return 1000L + ordinal;
     }
 
     private static HashSet<string> CollectExternalScalarIdentifiers(

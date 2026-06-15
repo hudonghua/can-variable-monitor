@@ -20,7 +20,7 @@ namespace CanVariableMonitor;
 
 public sealed partial class MainForm : Form
 {
-	private const string UpperComputerVersion = "V1.4";
+	private const string UpperComputerVersion = "V1.41";
 
 	private const string AppDisplayName = "上位机监控";
 
@@ -752,7 +752,12 @@ public sealed partial class MainForm : Form
 		"volatile", "while", "bool", "__irq", "__weak", "__asm", "__asm__", "__attribute__",
 		"uint8_t", "uint16_t", "uint32_t", "uint64_t", "int8_t", "int16_t", "int32_t", "int64_t",
 		"uint8", "uint16", "uint32", "uint64", "int8", "int16", "int32", "int64",
-		"u8", "u16", "u32", "u64", "s8", "s16", "s32", "s64"
+		"u8", "u16", "u32", "u64", "s8", "s16", "s32", "s64",
+		"U8", "U16", "U32", "U64", "S8", "S16", "S32", "S64",
+		"__I", "__O", "__IO", "__IM", "__OM", "__IOM", "__INLINE", "__STATIC_INLINE",
+		"__ASM", "__packed", "__align", "__forceinline", "__no_init", "__root",
+		"BYTE", "WORD", "DWORD", "BOOL", "TRUE", "FALSE", "uchar", "ushort", "uint", "ulong",
+		"sfr", "sbit", "bit", "data", "idata", "xdata", "pdata", "code", "interrupt", "using", "reentrant"
 	};
 
 	private static readonly HashSet<string> CCodeKeywordSet = new(CCodeKeywords, StringComparer.Ordinal);
@@ -2714,17 +2719,7 @@ public sealed partial class MainForm : Form
 		editor.StyleClearAll();
 		editor.Styles[ScintillaNET.Style.LineNumber].BackColor = _surface;
 		editor.Styles[ScintillaNET.Style.LineNumber].ForeColor = _muted;
-		editor.Styles[ScintillaNET.Style.Cpp.Default].BackColor = _surface;
-		editor.Styles[ScintillaNET.Style.Cpp.Default].ForeColor = _ink;
-		editor.Styles[ScintillaNET.Style.Cpp.Comment].ForeColor = _codeCommentColor;
-		editor.Styles[ScintillaNET.Style.Cpp.CommentLine].ForeColor = _codeCommentColor;
-		editor.Styles[ScintillaNET.Style.Cpp.CommentDoc].ForeColor = _codeCommentColor;
-		editor.Styles[ScintillaNET.Style.Cpp.Number].ForeColor = _accent;
-		editor.Styles[ScintillaNET.Style.Cpp.Word].ForeColor = _codeKeywordColor;
-		editor.Styles[ScintillaNET.Style.Cpp.Word].Bold = true;
-		editor.Styles[ScintillaNET.Style.Cpp.String].ForeColor = _codeValueColor;
-		editor.Styles[ScintillaNET.Style.Cpp.StringEol].ForeColor = _codeValueColor;
-		editor.Styles[ScintillaNET.Style.Cpp.Word2].ForeColor = _codeFunctionColor;
+		ApplyScintillaCppStylePalette(editor);
 		float inlineValueFontSize = Math.Max(9f, _functionCodeFontSize + 1f);
 		editor.Styles[ScintillaStyleValueFresh].Font = KeilCodeFontFamily;
 		editor.Styles[ScintillaStyleValueFresh].SizeF = inlineValueFontSize;
@@ -2824,6 +2819,49 @@ public sealed partial class MainForm : Form
 		editor.Indicators[ScintillaIndicatorTrueCondition].OutlineAlpha = 255;
 		editor.Indicators[ScintillaIndicatorTrueCondition].Under = false;
 		editor.ScrollWidthTracking = true;
+	}
+
+	private void ApplyScintillaCppStylePalette(Scintilla editor)
+	{
+		SetScintillaStyle(editor, ScintillaNET.Style.Cpp.Default, _ink);
+		SetScintillaStyle(editor, ScintillaNET.Style.Cpp.Identifier, _ink);
+		SetScintillaStyle(editor, ScintillaNET.Style.Cpp.Operator, _ink);
+		SetScintillaStyle(editor, ScintillaNET.Style.Cpp.Number, _accent);
+		SetScintillaStyle(editor, ScintillaNET.Style.Cpp.Uuid, _accent);
+		SetScintillaStyle(editor, ScintillaNET.Style.Cpp.Word, _codeKeywordColor, bold: true);
+		SetScintillaStyle(editor, ScintillaNET.Style.Cpp.Word2, _codeFunctionColor);
+		SetScintillaStyle(editor, ScintillaNET.Style.Cpp.GlobalClass, _codeFunctionColor);
+		SetScintillaStyle(editor, ScintillaNET.Style.Cpp.Preprocessor, _codeKeywordColor, bold: true);
+
+		SetScintillaStyle(editor, ScintillaNET.Style.Cpp.String, _codeValueColor);
+		SetScintillaStyle(editor, ScintillaNET.Style.Cpp.Character, _codeValueColor);
+		SetScintillaStyle(editor, ScintillaNET.Style.Cpp.StringEol, _codeValueColor);
+		SetScintillaStyle(editor, ScintillaNET.Style.Cpp.Verbatim, _codeValueColor);
+		SetScintillaStyle(editor, ScintillaNET.Style.Cpp.Regex, _codeValueColor);
+		SetScintillaStyle(editor, ScintillaNET.Style.Cpp.StringRaw, _codeValueColor);
+		SetScintillaStyle(editor, ScintillaNET.Style.Cpp.TripleVerbatim, _codeValueColor);
+		SetScintillaStyle(editor, ScintillaNET.Style.Cpp.HashQuotedString, _codeValueColor);
+		SetScintillaStyle(editor, ScintillaNET.Style.Cpp.UserLiteral, _codeValueColor);
+		SetScintillaStyle(editor, ScintillaNET.Style.Cpp.EscapeSequence, _codeValueColor);
+
+		SetScintillaStyle(editor, ScintillaNET.Style.Cpp.Comment, _codeCommentColor);
+		SetScintillaStyle(editor, ScintillaNET.Style.Cpp.CommentLine, _codeCommentColor);
+		SetScintillaStyle(editor, ScintillaNET.Style.Cpp.CommentDoc, _codeCommentColor);
+		SetScintillaStyle(editor, ScintillaNET.Style.Cpp.CommentLineDoc, _codeCommentColor);
+		SetScintillaStyle(editor, ScintillaNET.Style.Cpp.CommentDocKeyword, _codeCommentColor);
+		SetScintillaStyle(editor, ScintillaNET.Style.Cpp.CommentDocKeywordError, _codeCommentColor);
+		SetScintillaStyle(editor, ScintillaNET.Style.Cpp.PreprocessorComment, _codeCommentColor);
+		SetScintillaStyle(editor, ScintillaNET.Style.Cpp.PreprocessorCommentDoc, _codeCommentColor);
+		SetScintillaStyle(editor, ScintillaNET.Style.Cpp.TaskMarker, _codeCommentColor, bold: true);
+	}
+
+	private void SetScintillaStyle(Scintilla editor, int style, Color foreColor, bool bold = false)
+	{
+		editor.Styles[style].Font = KeilCodeFontFamily;
+		editor.Styles[style].SizeF = _functionCodeFontSize;
+		editor.Styles[style].BackColor = _surface;
+		editor.Styles[style].ForeColor = foreColor;
+		editor.Styles[style].Bold = bold;
 	}
 
 
@@ -11847,7 +11885,7 @@ public sealed partial class MainForm : Form
 		{
 			visibleEndInLine--;
 		}
-		int endPosition = Math.Clamp(line.Position + Math.Max(0, visibleEndInLine), 0, editor.TextLength);
+		int endPosition = GetScintillaLinePositionFromCharIndex(lineIndex, lineText, visibleEndInLine);
 		int endX = editor.PointXFromPosition(endPosition);
 		if (location.X > endX + Ui(18))
 		{
@@ -13366,7 +13404,7 @@ public sealed partial class MainForm : Form
 			{
 				return;
 			}
-			int start = _codeEditor.Lines[searchLineIndex].Position + searchIndex;
+			int start = GetScintillaLinePositionFromCharIndex(searchLineIndex, searchLineText, searchIndex);
 			CollapseScintillaSelection(start);
 			ScrollDisplayedLineNearTop(searchLineIndex);
 			return;
@@ -14279,6 +14317,22 @@ public sealed partial class MainForm : Form
 		int byteOffset = Encoding.UTF8.GetByteCount(lineText.Substring(0, safeCharIndex));
 		int position = _codeEditor.Lines[lineIndex].Position + byteOffset;
 		return Math.Clamp(position, 0, _codeEditor.TextLength);
+	}
+
+	private (int Start, int Length) GetScintillaLineRangeFromCharRange(int lineIndex, string lineText, int charStart, int charLength)
+	{
+		if (_codeEditor == null || _codeEditor.IsDisposed ||
+			lineIndex < 0 || lineIndex >= _codeEditor.Lines.Count ||
+			charLength <= 0)
+		{
+			return (0, 0);
+		}
+
+		int safeStart = Math.Clamp(charStart, 0, lineText.Length);
+		int safeEnd = Math.Clamp(safeStart + charLength, safeStart, lineText.Length);
+		int start = GetScintillaLinePositionFromCharIndex(lineIndex, lineText, safeStart);
+		int end = GetScintillaLinePositionFromCharIndex(lineIndex, lineText, safeEnd);
+		return (start, Math.Max(0, Math.Min(end, _codeEditor.TextLength) - start));
 	}
 
 	private Color PickCodeValueOverlayForeColor()
@@ -17506,6 +17560,7 @@ public sealed partial class MainForm : Form
 			_functionCodeBox.Text = nextText;
 		}
 
+		RefreshScintillaLexing();
 		ApplyScintillaSemanticStyles(renderedLines);
 		if (includeValues)
 		{
@@ -17546,6 +17601,28 @@ public sealed partial class MainForm : Form
 		UpdateScintillaScopeHighlight(force: true);
 
 		ForceCodeBoxLeftAligned(targetBox: _functionCodeBox);
+	}
+
+	private void RefreshScintillaLexing()
+	{
+		if (_codeEditor == null || _codeEditor.IsDisposed || _codeEditor.TextLength == 0)
+		{
+			return;
+		}
+
+		try
+		{
+			_codeEditor.Colorize(0, -1);
+		}
+		catch (Exception ex)
+		{
+			DateTime now = DateTime.UtcNow;
+			if ((now - _lastInlineValueStyleLogUtc).TotalSeconds >= 30)
+			{
+				_lastInlineValueStyleLogUtc = now;
+				Log("代码词法刷新失败：" + ex.Message);
+			}
+		}
 	}
 
 	private void ApplyScintillaSemanticStyles(IReadOnlyList<CodeLineRender> renderedLines)
@@ -17898,8 +17975,14 @@ public sealed partial class MainForm : Form
 			return;
 		}
 
+		(int start, int byteLength) = GetScintillaLineRangeFromCharRange(lineIndex, line.Text, startInLine, length);
+		if (byteLength <= 0)
+		{
+			return;
+		}
+
 		_codeEditor.IndicatorCurrent = ScintillaIndicatorTrueCondition;
-		_codeEditor.IndicatorFillRange(line.Position + startInLine, length);
+		_codeEditor.IndicatorFillRange(start, byteLength);
 	}
 
 	private static bool TryGetIfConditionDisplaySpan(string line, out int start, out int length)
@@ -18004,25 +18087,30 @@ public sealed partial class MainForm : Form
 			return;
 		}
 
-		int start = line.Position + startInLine;
+		(int start, int byteLength) = GetScintillaLineRangeFromCharRange(lineIndex, text, startInLine, length);
+		if (byteLength <= 0)
+		{
+			return;
+		}
+
 		_codeEditor.IndicatorCurrent = ScintillaIndicatorValueNormal;
-		_codeEditor.IndicatorClearRange(start, length);
+		_codeEditor.IndicatorClearRange(start, byteLength);
 		_codeEditor.IndicatorCurrent = ScintillaIndicatorValueFresh;
-		_codeEditor.IndicatorClearRange(start, length);
+		_codeEditor.IndicatorClearRange(start, byteLength);
 		_codeEditor.IndicatorCurrent = ScintillaIndicatorValueNormalBorder;
-		_codeEditor.IndicatorClearRange(start, length);
+		_codeEditor.IndicatorClearRange(start, byteLength);
 		_codeEditor.IndicatorCurrent = ScintillaIndicatorValueFreshBorder;
-		_codeEditor.IndicatorClearRange(start, length);
+		_codeEditor.IndicatorClearRange(start, byteLength);
 		_codeEditor.IndicatorCurrent = ScintillaIndicatorValueNormalText;
-		_codeEditor.IndicatorClearRange(start, length);
+		_codeEditor.IndicatorClearRange(start, byteLength);
 		_codeEditor.IndicatorCurrent = ScintillaIndicatorValueFreshText;
-		_codeEditor.IndicatorClearRange(start, length);
+		_codeEditor.IndicatorClearRange(start, byteLength);
 		_codeEditor.IndicatorCurrent = fresh ? ScintillaIndicatorValueFresh : ScintillaIndicatorValueNormal;
-		_codeEditor.IndicatorFillRange(start, length);
+		_codeEditor.IndicatorFillRange(start, byteLength);
 		_codeEditor.IndicatorCurrent = fresh ? ScintillaIndicatorValueFreshBorder : ScintillaIndicatorValueNormalBorder;
-		_codeEditor.IndicatorFillRange(start, length);
+		_codeEditor.IndicatorFillRange(start, byteLength);
 		_codeEditor.IndicatorCurrent = fresh ? ScintillaIndicatorValueFreshText : ScintillaIndicatorValueNormalText;
-		_codeEditor.IndicatorFillRange(start, length);
+		_codeEditor.IndicatorFillRange(start, byteLength);
 	}
 
 	private void ApplyScintillaForceHoldIndicatorsToLine(int lineIndex, string rawLine, IReadOnlyList<WatchItem> candidates)
@@ -18071,11 +18159,16 @@ public sealed partial class MainForm : Form
 				continue;
 			}
 
-			int start = line.Position + valueStart;
+			(int start, int byteLength) = GetScintillaLineRangeFromCharRange(lineIndex, text, valueStart, length);
+			if (byteLength <= 0)
+			{
+				continue;
+			}
+
 			_codeEditor.IndicatorCurrent = ScintillaIndicatorForceHold;
-			_codeEditor.IndicatorFillRange(start, length);
+			_codeEditor.IndicatorFillRange(start, byteLength);
 			_codeEditor.IndicatorCurrent = ScintillaIndicatorForceHoldText;
-			_codeEditor.IndicatorFillRange(start, length);
+			_codeEditor.IndicatorFillRange(start, byteLength);
 		}
 	}
 
@@ -18092,7 +18185,6 @@ public sealed partial class MainForm : Form
 		}
 
 		string text = _codeEditor.Lines[lineIndex].Text;
-		int lineStart = _codeEditor.Lines[lineIndex].Position;
 		int index = 0;
 		while (index < text.Length)
 		{
@@ -18103,8 +18195,15 @@ public sealed partial class MainForm : Form
 			}
 			if (IsWholeIdentifierMatch(text, match, token.Length))
 			{
+				(int start, int byteLength) = GetScintillaLineRangeFromCharRange(lineIndex, text, match, token.Length);
+				if (byteLength <= 0)
+				{
+					index = match + Math.Max(1, token.Length);
+					continue;
+				}
+
 				_codeEditor.IndicatorCurrent = indicator;
-				_codeEditor.IndicatorFillRange(lineStart + match, token.Length);
+				_codeEditor.IndicatorFillRange(start, byteLength);
 			}
 			index = match + Math.Max(1, token.Length);
 		}
