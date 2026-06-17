@@ -3553,7 +3553,7 @@ public sealed partial class MainForm : Form
 			{
 				_symbols = symbols;
 				RebuildSymbolIndexes();
-				RebuildSourceSymbolIndex();
+				_sourceSymbolIndex = SourceSymbolIndex.Empty;
 				RefreshWatchMetadataFromSymbols();
 				_mapFilePath = text;
 				_mapLastWrite = File.GetLastWriteTimeUtc(text);
@@ -3613,7 +3613,7 @@ public sealed partial class MainForm : Form
 				Log($"变量文件已读取：{Path.GetFileName(path)}，RAM 变量 {_symbols.Count} 个。");
 			}
 			RebuildSymbolIndexes();
-			RebuildSourceSymbolIndex();
+			_sourceSymbolIndex = SourceSymbolIndex.Empty;
 			RefreshWatchMetadataFromSymbols();
 			_mapLastWrite = File.GetLastWriteTimeUtc(path);
 			_symbolCountLabel.Text = $"已读取 {_symbols.Count} 个 RAM 变量";

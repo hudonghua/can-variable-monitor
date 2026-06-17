@@ -85,6 +85,7 @@ can_monitor_latest.zip
 - `dotnet run --no-build --project .\CanVariableMonitor\CanVariableMonitor.csproj -- --syntax-highlight-self-test`：通过。
 - `powershell -ExecutionPolicy Bypass -File .\CanVariableMonitor\OfflineWorkerSelfTest.ps1`：通过。
 - 三个真实 Keil 工程 `OfflineRealProjectProbe.ps1 -ProjectSrc ...`：通过；铵油装药车编码器铁轮版、旭工干喷、华矿二代半液压主控均保持 `__canmon_main_loop_tick`，强制分支执行通过。
+- 启动修正：V1.43 初版曾在读取 map/axf 后同步重建 `SourceSymbolIndex`，大工程启动时会在 MainForm 创建窗口前扫描全工程，表现为进程存在但 `MainWindowHandle=0`、界面不出来。已改为读取 map/axf 时只清空源码索引，源码符号索引在打开代码/右键/重构时按需重建。
 
 ## 2026-06-15 V1.3 main-loop 离线内测结果
 
