@@ -342,6 +342,10 @@ public sealed partial class MainForm : Form
 
 	private SourceSymbolIndex _sourceSymbolIndex = SourceSymbolIndex.Empty;
 
+	private bool _sourceSymbolIndexBuildRunning;
+
+	private int _sourceSymbolIndexBuildVersion;
+
 	private readonly List<KeilBuildDiagnostic> _lastBuildDiagnostics = new List<KeilBuildDiagnostic>();
 
 	private bool _sourceEditInternalTextChange;
@@ -18754,7 +18758,7 @@ public sealed partial class MainForm : Form
 		{
 			_sourceEditSession = SourceEditSession.Load(codeView.FilePath);
 			UpdateSourceEditStatus("已保存", _muted);
-			EnsureSourceSymbolIndex();
+			QueueSourceSymbolIndexBuild();
 		}
 		catch (Exception ex)
 		{
@@ -18764,7 +18768,31 @@ public sealed partial class MainForm : Form
 		}
 	}
 
-	private void EnsureSourceSymbolIndex()
+	private bool TryEnsureSourceSymbolIndexReady()
+	{
+		if (string.IsNullOrWhiteSpace(_workDirectory) || !Directory.Exists(_workDirectory))
+		{
+			_sourceSymbolIndex = SourceSymbolIndex.Empty;
+			return false;
+		}
+
+		if (_sourceSymbolIndex.Root.Equals(_workDirectory, StringComparison.OrdinalIgnoreCase) &&
+			_sourceSymbolIndex.Symbols.Count > 0)
+		{
+			return true;
+		}
+
+		QueueSourceSymbolIndexBuild();
+		return false;
+	}
+
+	private void InvalidateSourceSymbolIndex()
+	{
+		_sourceSymbolIndex = SourceSymbolIndex.Empty;
+		_sourceSymbolIndexBuildVersion++;
+	}
+
+	private void QueueSourceSymbolIndexBuild()
 	{
 		if (string.IsNullOrWhiteSpace(_workDirectory) || !Directory.Exists(_workDirectory))
 		{
@@ -18778,20 +18806,56 @@ public sealed partial class MainForm : Form
 			return;
 		}
 
-		RebuildSourceSymbolIndex();
-	}
+		if (_sourceSymbolIndexBuildRunning)
+		{
+			return;
+		}
 
-	private void RebuildSourceSymbolIndex()
-	{
-		try
-		{
-			_sourceSymbolIndex = SourceSymbolIndex.Build(_workDirectory, _symbols);
-		}
-		catch (Exception ex)
-		{
-			_sourceSymbolIndex = SourceSymbolIndex.Empty;
-			Log("源码符号索引失败：" + ex.Message);
-		}
+		string root = _workDirectory;
+		List<MapSymbol> symbols = new List<MapSymbol>(_symbols);
+		int version = _sourceSymbolIndexBuildVersion;
+		_sourceSymbolIndexBuildRunning = true;
+		_ = Task.Run(() => SourceSymbolIndex.Build(root, symbols))
+			.ContinueWith(task =>
+			{
+				try
+				{
+					if (!IsDisposed && IsHandleCreated)
+					{
+						BeginInvoke(new Action(() =>
+						{
+							_sourceSymbolIndexBuildRunning = false;
+							if (version != _sourceSymbolIndexBuildVersion ||
+								!root.Equals(_workDirectory, StringComparison.OrdinalIgnoreCase))
+							{
+								return;
+							}
+
+							if (task.Status == TaskStatus.RanToCompletion)
+							{
+								_sourceSymbolIndex = task.Result;
+							}
+							else
+							{
+								_sourceSymbolIndex = SourceSymbolIndex.Empty;
+								Exception? error = task.Exception?.GetBaseException();
+								if (error != null)
+								{
+									Log("源码符号索引失败：" + error.Message);
+								}
+							}
+						}));
+					}
+					else
+					{
+						_sourceSymbolIndexBuildRunning = false;
+					}
+				}
+				catch
+				{
+					_sourceSymbolIndexBuildRunning = false;
+				}
+			}, TaskScheduler.Default);
 	}
 
 	private void CodeEditorTextChanged(object? sender, EventArgs e)
@@ -18870,7 +18934,8 @@ public sealed partial class MainForm : Form
 			_offlineProgramModel = null;
 			_offlineCWorkerSignature = "";
 			_offlineApplicationSources = new List<FunctionSourceView>();
-			RebuildSourceSymbolIndex();
+			InvalidateSourceSymbolIndex();
+			QueueSourceSymbolIndexBuild();
 			RefreshCurrentFunctionSourceAfterSourceSave();
 			UpdateSourceEditStatus("已保存", _muted);
 			Log(result.Message);
@@ -18952,7 +19017,8 @@ public sealed partial class MainForm : Form
 				}
 				ClearFunctionIndex();
 				WarmFunctionIndex(_workDirectory);
-				RebuildSourceSymbolIndex();
+				InvalidateSourceSymbolIndex();
+				QueueSourceSymbolIndexBuild();
 				StartProgramGraphAnalysis(_workDirectory);
 				SaveDefaultProfileQuietly();
 			}
@@ -19053,7 +19119,11 @@ public sealed partial class MainForm : Form
 			return false;
 		}
 
-		EnsureSourceSymbolIndex();
+		if (!TryEnsureSourceSymbolIndexReady())
+		{
+			return false;
+		}
+
 		int lineIndex = _codeEditor.LineFromPosition(Math.Clamp(_codeEditor.CurrentPosition, 0, Math.Max(0, _codeEditor.TextLength)));
 		int absoluteLine = codeView.StartLine + lineIndex;
 		return _sourceSymbolIndex.TryResolveIdentifier(codeView.FilePath, absoluteLine, identifier, out symbol);
@@ -19073,7 +19143,11 @@ public sealed partial class MainForm : Form
 			return false;
 		}
 
-		EnsureSourceSymbolIndex();
+		if (!TryEnsureSourceSymbolIndexReady())
+		{
+			return false;
+		}
+
 		int lineIndex = _codeEditor.LineFromPosition(Math.Clamp(position, 0, Math.Max(0, _codeEditor.TextLength)));
 		int absoluteLine = codeView.StartLine + lineIndex;
 		return _sourceSymbolIndex.TryResolveIdentifier(codeView.FilePath, absoluteLine, identifier, out symbol);
@@ -19109,7 +19183,13 @@ public sealed partial class MainForm : Form
 			return;
 		}
 
-		EnsureSourceSymbolIndex();
+		if (!TryEnsureSourceSymbolIndexReady())
+		{
+			UpdateSourceEditStatus("源码索引构建中", _muted);
+			Log("源码索引还在构建，稍后再重命名。");
+			return;
+		}
+
 		SourceRenameResult result = _sourceSymbolIndex.RenameSymbolInProject(symbol, newName.Trim());
 		foreach (SourceDiagnostic diagnostic in result.Diagnostics)
 		{
@@ -19123,7 +19203,8 @@ public sealed partial class MainForm : Form
 
 		ClearFunctionIndex();
 		_sourceEditSession = null;
-		RebuildSourceSymbolIndex();
+		InvalidateSourceSymbolIndex();
+		QueueSourceSymbolIndexBuild();
 		RefreshCurrentFunctionSourceFromDisk(logResult: false);
 		UpdateSourceEditStatus("已重命名", _accent);
 		Log($"源码重构：{symbol.Name} -> {newName.Trim()}，{result.ReplacementCount} 处，文件 {result.ChangedFiles.Count} 个。");
@@ -19161,7 +19242,13 @@ public sealed partial class MainForm : Form
 
 		int lineIndex = _codeEditor.LineFromPosition(Math.Clamp(_codeEditor.CurrentPosition, 0, Math.Max(0, _codeEditor.TextLength)));
 		int absoluteLine = codeView.StartLine + lineIndex;
-		EnsureSourceSymbolIndex();
+		if (!TryEnsureSourceSymbolIndexReady())
+		{
+			UpdateSourceEditStatus("源码索引构建中", _muted);
+			Log("源码索引还在构建，稍后再声明局部变量。");
+			return;
+		}
+
 		if (_sourceSymbolIndex.TryDeclareLocalVariable(codeView.FilePath, _codeEditor.Text, absoluteLine, name, typeName, out string newText, out SourceDiagnostic diagnostic))
 		{
 			_sourceEditInternalTextChange = true;
