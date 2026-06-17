@@ -362,8 +362,6 @@ public sealed partial class MainForm : Form
 
 	private bool _sourceEditEnabled = true;
 
-	private bool _autoBuildAfterSourceSave = true;
-
 	private readonly Stack<CodeViewSnapshot> _functionHistory = new Stack<CodeViewSnapshot>();
 
 	private readonly Stack<CodeViewSnapshot> _functionForwardHistory = new Stack<CodeViewSnapshot>();
@@ -1044,7 +1042,7 @@ public sealed partial class MainForm : Form
 		_sourceEditSaveTimer.Tick += async delegate
 		{
 			_sourceEditSaveTimer.Stop();
-			await SaveSourceEditNowAsync(scheduleBuild: true).ConfigureAwait(true);
+			await SaveSourceEditNowAsync().ConfigureAwait(true);
 		};
 		_sourceEditBuildTimer.Interval = 3000;
 		_sourceEditBuildTimer.Tick += async delegate
@@ -2372,12 +2370,12 @@ public sealed partial class MainForm : Form
 			FlowDirection = FlowDirection.LeftToRight,
 			WrapContents = true
 		};
-		_startButton = CommandButton("开始监控");
+		_startButton = CommandButton("编译");
 		_startButton.Size = new Size(Ui(92), Ui(30));
-		ApplyButtonStyle(_startButton, "monitorStart");
-		_startButton.Click += delegate
+		ApplyButtonStyle(_startButton, "working");
+		_startButton.Click += async delegate
 		{
-			TogglePolling();
+			await RunManualSourceBuildAsync().ConfigureAwait(true);
 		};
 		_startButton.Margin = new Padding(0, Ui(2), Ui(6), 0);
 		flowLayoutPanel.Controls.Add(_startButton);
@@ -2761,7 +2759,11 @@ public sealed partial class MainForm : Form
 			VScrollBar = true,
 			WrapMode = ScintillaNET.WrapMode.None,
 			TabWidth = 4,
+			IndentWidth = 4,
 			UseTabs = false,
+			TabIndents = true,
+			BackspaceUnindents = true,
+			IndentationGuides = ScintillaNET.IndentView.LookBoth,
 			Font = CreateCodeFont(_functionCodeFontSize),
 			BackColor = _surface,
 			ForeColor = _ink,
@@ -2780,6 +2782,7 @@ public sealed partial class MainForm : Form
 		};
 		editor.MouseWheel += CodeEditorMouseWheel;
 		editor.KeyDown += CodeEditorKeyDown;
+		editor.CharAdded += CodeEditorCharAdded;
 		editor.TextChanged += CodeEditorTextChanged;
 		editor.UpdateUI += CodeEditorUpdateUI;
 		editor.ContextMenuStrip = CreateCodeWatchContextMenu(editor);
@@ -2829,6 +2832,10 @@ public sealed partial class MainForm : Form
 		editor.Styles[ScintillaStyleParameterName].ForeColor = _accent;
 		editor.Styles[ScintillaStyleParameterName].Bold = false;
 		editor.SetKeywords(0, string.Join(" ", CCodeKeywords));
+		editor.CaretStyle = ScintillaNET.CaretStyle.Line;
+		editor.CaretWidth = 2;
+		editor.CaretPeriod = 520;
+		editor.CaretForeColor = IsCurrentLightTheme() ? Color.FromArgb(16, 24, 39) : Color.FromArgb(248, 250, 252);
 		editor.CaretLineVisible = false;
 		editor.CaretLineBackColor = Color.FromArgb(0, _surface);
 		editor.CaretLineLayer = ScintillaNET.Layer.UnderText;
@@ -4726,8 +4733,6 @@ public sealed partial class MainForm : Form
 		PrepareVisiblePollingContext();
 		_pollCts = new CancellationTokenSource();
 		_running = true;
-		_startButton.Text = "停止监控";
-		ApplyButtonStyle(_startButton, "monitorStop");
 		UpdateCycleEstimate();
 		MarkCodeValueRenderStateChanged();
 		_monitorTxProbeRemaining = 3;
@@ -4779,11 +4784,6 @@ public sealed partial class MainForm : Form
 		_pollCts = null;
 		_pollTask = null;
 		_running = false;
-		if (_startButton != null)
-		{
-			_startButton.Text = "开始监控";
-			ApplyButtonStyle(_startButton, "monitorStart");
-		}
 		UpdateCycleEstimate();
 		RestorePureCodeViewAfterMonitoringStateChanged();
 	}
@@ -4891,11 +4891,6 @@ public sealed partial class MainForm : Form
 		{
 			_running = false;
 			_monitorSessionOpen = false;
-			if (_startButton != null && !_startButton.IsDisposed)
-			{
-				_startButton.Text = "开始监控";
-				ApplyButtonStyle(_startButton, "monitorStart");
-			}
 			UpdateCycleEstimate();
 			RestorePureCodeViewAfterMonitoringStateChanged();
 			Log(message);
@@ -12738,7 +12733,7 @@ public sealed partial class MainForm : Form
 		if (e.Control && e.KeyCode == Keys.S)
 		{
 			_sourceEditSaveTimer.Stop();
-			_ = SaveSourceEditNowAsync(scheduleBuild: true);
+			_ = SaveSourceEditNowAsync();
 			e.SuppressKeyPress = true;
 			e.Handled = true;
 			return;
@@ -12763,6 +12758,51 @@ public sealed partial class MainForm : Form
 			e.SuppressKeyPress = true;
 			e.Handled = true;
 		}
+	}
+
+	private void CodeEditorCharAdded(object? sender, ScintillaNET.CharAddedEventArgs e)
+	{
+		if (_sourceEditInternalTextChange ||
+			e.Char != '\n' ||
+			sender is not Scintilla editor ||
+			editor.IsDisposed)
+		{
+			return;
+		}
+
+		int lineIndex = editor.LineFromPosition(editor.CurrentPosition);
+		if (lineIndex <= 0 || lineIndex >= editor.Lines.Count)
+		{
+			return;
+		}
+
+		string previousLine = editor.Lines[lineIndex - 1].Text.TrimEnd('\r', '\n');
+		string indent = GetLeadingWhitespace(previousLine);
+		string trimmedPrevious = previousLine.TrimEnd();
+		if (trimmedPrevious.EndsWith("{", StringComparison.Ordinal))
+		{
+			indent += new string(' ', Math.Max(1, editor.IndentWidth));
+		}
+
+		if (indent.Length == 0)
+		{
+			return;
+		}
+
+		int insertPosition = editor.CurrentPosition;
+		editor.InsertText(insertPosition, indent);
+		editor.GotoPosition(insertPosition + indent.Length);
+	}
+
+	private static string GetLeadingWhitespace(string text)
+	{
+		int index = 0;
+		while (index < text.Length && (text[index] == ' ' || text[index] == '\t'))
+		{
+			index++;
+		}
+
+		return index == 0 ? "" : text[..index];
 	}
 
 	private void CodeEditorUpdateUI(object? sender, ScintillaNET.UpdateUIEventArgs e)
@@ -18889,7 +18929,7 @@ public sealed partial class MainForm : Form
 		_sourceEditSaveTimer.Start();
 	}
 
-	private async Task SaveSourceEditNowAsync(bool scheduleBuild)
+	private async Task SaveSourceEditNowAsync()
 	{
 		if (_sourceEditSaving || _sourceEditSession == null || _codeEditor == null || _codeEditor.IsDisposed)
 		{
@@ -18939,11 +18979,6 @@ public sealed partial class MainForm : Form
 			RefreshCurrentFunctionSourceAfterSourceSave();
 			UpdateSourceEditStatus("已保存", _muted);
 			Log(result.Message);
-			if (scheduleBuild && _autoBuildAfterSourceSave)
-			{
-				_sourceEditBuildTimer.Stop();
-				_sourceEditBuildTimer.Start();
-			}
 		}
 		catch (Exception ex)
 		{
@@ -18973,6 +19008,12 @@ public sealed partial class MainForm : Form
 		}
 	}
 
+	private async Task RunManualSourceBuildAsync()
+	{
+		_sourceEditBuildTimer.Stop();
+		await RunSourceEditBuildAsync().ConfigureAwait(true);
+	}
+
 	private async Task RunSourceEditBuildAsync()
 	{
 		if (_sourceBuildRunning)
@@ -18987,7 +19028,7 @@ public sealed partial class MainForm : Form
 
 		if (_sourceEditSession != null && _sourceEditSession.Dirty)
 		{
-			await SaveSourceEditNowAsync(scheduleBuild: false).ConfigureAwait(true);
+			await SaveSourceEditNowAsync().ConfigureAwait(true);
 			if (_sourceEditSession.Dirty)
 			{
 				return;
@@ -19074,7 +19115,42 @@ public sealed partial class MainForm : Form
 			!string.IsNullOrWhiteSpace(diagnostic.FilePath) &&
 			File.Exists(diagnostic.FilePath))
 		{
-			NavigateToSourceLocation(diagnostic.FilePath, Math.Max(1, diagnostic.Line), pushCurrent: _currentFunctionSource != null);
+			int line = Math.Max(1, diagnostic.Line);
+			NavigateToSourceLocation(diagnostic.FilePath, line, pushCurrent: _currentFunctionSource != null);
+			LockBuildDiagnosticSourceLine(line);
+			BeginInvoke(new Action(() => LockBuildDiagnosticSourceLine(line)));
+		}
+	}
+
+	private void LockBuildDiagnosticSourceLine(int absoluteLine)
+	{
+		if (_codeEditor != null &&
+			!_codeEditor.IsDisposed &&
+			_codeEditor.TextLength > 0 &&
+			GetCodeViewSource() is FunctionSourceView codeView)
+		{
+			int lineIndex = Math.Clamp(absoluteLine - codeView.StartLine, 0, Math.Max(0, _codeEditor.Lines.Count - 1));
+			_codeEditor.MarkerDeleteAll(ScintillaMarkerSearchLine);
+			_codeEditor.Lines[lineIndex].MarkerAdd(ScintillaMarkerSearchLine);
+			int lineStart = _codeEditor.Lines[lineIndex].Position;
+			int lineEnd = lineIndex + 1 < _codeEditor.Lines.Count
+				? _codeEditor.Lines[lineIndex + 1].Position
+				: _codeEditor.TextLength;
+			_codeEditor.Focus();
+			_codeEditor.SetSelection(lineEnd, lineStart);
+			_codeEditor.FirstVisibleLine = Math.Max(0, lineIndex - Math.Max(2, _codeEditor.LinesOnScreen / 3));
+			_codeEditor.XOffset = 0;
+			ProtectCodeViewport(1600);
+			UpdateSourceEditStatus($"已定位编译错误：{absoluteLine} 行", Color.FromArgb(248, 113, 113));
+			return;
+		}
+
+		if (_functionCodeBox != null && !_functionCodeBox.IsDisposed && _functionCodeBox.TextLength > 0)
+		{
+			_functionCodeBox.Focus();
+			SelectApproximateLineInFunction(absoluteLine);
+			ProtectCodeViewport(1600);
+			UpdateSourceEditStatus($"已定位编译错误：{absoluteLine} 行", Color.FromArgb(248, 113, 113));
 		}
 	}
 
@@ -19176,7 +19252,7 @@ public sealed partial class MainForm : Form
 			return;
 		}
 
-		await SaveSourceEditNowAsync(scheduleBuild: false).ConfigureAwait(true);
+		await SaveSourceEditNowAsync().ConfigureAwait(true);
 		if (_sourceEditSession != null && _sourceEditSession.Dirty)
 		{
 			Log("当前源码未保存，已取消重命名。");
@@ -19208,11 +19284,6 @@ public sealed partial class MainForm : Form
 		RefreshCurrentFunctionSourceFromDisk(logResult: false);
 		UpdateSourceEditStatus("已重命名", _accent);
 		Log($"源码重构：{symbol.Name} -> {newName.Trim()}，{result.ReplacementCount} 处，文件 {result.ChangedFiles.Count} 个。");
-		if (_autoBuildAfterSourceSave)
-		{
-			_sourceEditBuildTimer.Stop();
-			_sourceEditBuildTimer.Start();
-		}
 	}
 
 	private void DeclareLocalVariableFromCode(string identifier)
@@ -23017,7 +23088,7 @@ public sealed partial class MainForm : Form
 			KeilProjectPath = _keilProjectPath,
 			KeilTargetName = _keilTargetName,
 			SourceEditEnabled = _sourceEditEnabled,
-			AutoBuildAfterSourceSave = _autoBuildAfterSourceSave,
+			AutoBuildAfterSourceSave = false,
 			MonitorColumnWidths = columnWidths,
 			OfflineRootFunctions = GetConfiguredOfflineRootNames().ToList(),
 			Variables = BuildProfileVariables()
@@ -23184,7 +23255,6 @@ public sealed partial class MainForm : Form
 			_keilProjectPath = monitorProfile.KeilProjectPath ?? "";
 			_keilTargetName = monitorProfile.KeilTargetName ?? "";
 			_sourceEditEnabled = monitorProfile.SourceEditEnabled;
-			_autoBuildAfterSourceSave = monitorProfile.AutoBuildAfterSourceSave;
 			_offlineRootSelectionText = string.Join(", ", monitorProfile.OfflineRootFunctions
 				.Where(name => !string.IsNullOrWhiteSpace(name))
 				.Distinct(StringComparer.OrdinalIgnoreCase));

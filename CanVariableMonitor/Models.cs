@@ -64,7 +64,7 @@ internal sealed class MonitorProfile
     public string KeilProjectPath { get; set; } = "";
     public string KeilTargetName { get; set; } = "";
     public bool SourceEditEnabled { get; set; } = true;
-    public bool AutoBuildAfterSourceSave { get; set; } = true;
+    public bool AutoBuildAfterSourceSave { get; set; } = false;
     public List<int> MonitorColumnWidths { get; set; } = new();
     public List<string> OfflineRootFunctions { get; set; } = new();
     public List<WatchItem> Variables { get; set; } = new();
