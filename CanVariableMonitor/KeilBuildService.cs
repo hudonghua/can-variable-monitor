@@ -35,6 +35,7 @@ internal sealed class KeilBuildResult
 internal static class KeilBuildService
 {
     private const int BuildTimeoutMs = 180000;
+    private readonly record struct XmlTagBlock(int Start, int End, string Text);
 
     public static KeilProjectInfo? FindProject(string rootOrProjectFile, string preferredProjectFile = "", string preferredTargetName = "")
     {
@@ -365,9 +366,9 @@ internal static class KeilBuildService
     private static TargetOutputInfo? FindTargetOutputInfo(string projectFile, string targetName)
     {
         string text = File.ReadAllText(projectFile, Encoding.Default);
-        foreach (Match target in Regex.Matches(text, @"<Target>(?<body>.*?)</Target>", RegexOptions.IgnoreCase | RegexOptions.Singleline))
+        foreach (XmlTagBlock target in EnumerateTopLevelTagBlocks(text, "Target"))
         {
-            string body = target.Groups["body"].Value;
+            string body = target.Text;
             string name = ExtractTagValue(body, "TargetName");
             if (!name.Equals(targetName, StringComparison.OrdinalIgnoreCase))
             {
@@ -381,6 +382,46 @@ internal static class KeilBuildService
             };
         }
         return null;
+    }
+
+    private static IEnumerable<XmlTagBlock> EnumerateTopLevelTagBlocks(string text, string tag)
+    {
+        string open = "<" + tag + ">";
+        string close = "</" + tag + ">";
+        int search = 0;
+        while (true)
+        {
+            int start = text.IndexOf(open, search, StringComparison.OrdinalIgnoreCase);
+            if (start < 0)
+            {
+                yield break;
+            }
+
+            int position = start + open.Length;
+            int depth = 1;
+            while (depth > 0)
+            {
+                int nextOpen = text.IndexOf(open, position, StringComparison.OrdinalIgnoreCase);
+                int nextClose = text.IndexOf(close, position, StringComparison.OrdinalIgnoreCase);
+                if (nextClose < 0)
+                {
+                    yield break;
+                }
+
+                if (nextOpen >= 0 && nextOpen < nextClose)
+                {
+                    depth++;
+                    position = nextOpen + open.Length;
+                    continue;
+                }
+
+                depth--;
+                position = nextClose + close.Length;
+            }
+
+            yield return new XmlTagBlock(start, position, text.Substring(start, position - start));
+            search = position;
+        }
     }
 
     private static string ExtractTagValue(string text, string tag)

@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 
 namespace CanVariableMonitor;
 
@@ -28,6 +29,15 @@ static class Program
             string report = writer.ToString();
             Console.Write(report);
             WriteSelfTestLog("source_edit_selftest.log", report);
+            return exitCode;
+        }
+
+        int firmwareProbeIndex = Array.FindIndex(args, arg => arg.Equals("--firmware-install-probe", StringComparison.OrdinalIgnoreCase));
+        if (firmwareProbeIndex >= 0)
+        {
+            AttachParentConsole();
+            string projectRoot = firmwareProbeIndex + 1 < args.Length ? args[firmwareProbeIndex + 1] : "";
+            int exitCode = RunFirmwareInstallProbe(projectRoot);
             return exitCode;
         }
 
@@ -83,11 +93,54 @@ static class Program
         try
         {
             AttachConsole(AttachParentProcess);
+        }
+        catch
+        {
+        }
+
+        try
+        {
             Console.SetOut(new StreamWriter(Console.OpenStandardOutput()) { AutoFlush = true });
             Console.SetError(new StreamWriter(Console.OpenStandardError()) { AutoFlush = true });
         }
         catch
         {
+        }
+    }
+
+    private static int RunFirmwareInstallProbe(string projectRoot)
+    {
+        var report = new StringBuilder();
+        if (string.IsNullOrWhiteSpace(projectRoot))
+        {
+            string message = "FirmwareInstallProbe: missing project root.";
+            Console.WriteLine(message);
+            WriteSelfTestLog("firmware_install_probe.log", message + Environment.NewLine);
+            return 2;
+        }
+
+        try
+        {
+            string agentCopy = BundledFirmwareAgent.WriteTempCopy();
+            FirmwareInstallResult result = FirmwareInstaller.Install(projectRoot, agentCopy);
+            foreach (string message in result.Messages)
+            {
+                report.AppendLine(message);
+                Console.WriteLine(message);
+            }
+            string finalLine = result.Success ? "FirmwareInstallProbe: PASS" : "FirmwareInstallProbe: FAIL";
+            report.AppendLine(finalLine);
+            Console.WriteLine(finalLine);
+            WriteSelfTestLog("firmware_install_probe.log", report.ToString());
+            return result.Success ? 0 : 1;
+        }
+        catch (Exception ex)
+        {
+            string message = "FirmwareInstallProbe: EXCEPTION " + ex;
+            report.AppendLine(message);
+            Console.WriteLine(message);
+            WriteSelfTestLog("firmware_install_probe.log", report.ToString());
+            return 3;
         }
     }
 

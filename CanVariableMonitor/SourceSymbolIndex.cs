@@ -349,8 +349,11 @@ internal sealed class SourceSymbolIndex
         }
 
         string[] lines = ToLines(text);
-        int insertLine = Math.Clamp(function.StartLine, 0, lines.Length);
-        for (int i = function.StartLine; i < Math.Min(lines.Length, function.EndLine); i++)
+        int[] lineStarts = BuildLineStarts(text);
+        int bodyStartLine = GetLineNumber(lineStarts, function.BodyStartIndex);
+        int insertLine = Math.Clamp(bodyStartLine, 0, lines.Length);
+        int scanEndLine = Math.Clamp(function.EndLine - 1, insertLine, lines.Length);
+        for (int i = insertLine; i < scanEndLine; i++)
         {
             string trimmed = lines[i].Trim();
             if (trimmed.Length == 0 || trimmed.StartsWith("//", StringComparison.Ordinal) || trimmed.StartsWith("/*", StringComparison.Ordinal))
@@ -358,7 +361,7 @@ internal sealed class SourceSymbolIndex
                 insertLine = i + 1;
                 continue;
             }
-            if (LocalDeclRegex.IsMatch(MaskCommentsAndStrings(lines[i])))
+            if (IsLocalDeclarationLine(lines[i]))
             {
                 insertLine = i + 1;
                 continue;
@@ -412,7 +415,7 @@ internal sealed class SourceSymbolIndex
                 (global.Kind == SourceSymbolKind.GlobalVariable || global.Kind == SourceSymbolKind.ExternVariable) &&
                 global.HasAddress;
             bool declareOk = index.TryDeclareLocalVariable(a, File.ReadAllText(a), 6, "newLocal", "uint16_t", out string declared, out _) &&
-                declared.Contains("uint16_t newLocal = 0;", StringComparison.Ordinal);
+                declared.Contains("    int shared;\r\n    uint16_t newLocal = 0;\r\n    shared = p;", StringComparison.Ordinal);
 
             bool ok = localResolved && localRenameOk && globalResolved && declareOk;
             output.WriteLine(ok ? "SourceSymbolIndexSelfTest: PASS" : "SourceSymbolIndexSelfTest: FAIL");
@@ -793,6 +796,12 @@ internal sealed class SourceSymbolIndex
                 yield return match.Groups["name"].Value;
             }
         }
+    }
+
+    private static bool IsLocalDeclarationLine(string line)
+    {
+        Match match = LocalDeclRegex.Match(MaskCommentsAndStrings(line));
+        return match.Success && ExtractDeclaredNames(match.Groups["names"].Value).Any();
     }
 
     private static IEnumerable<string> SplitTopLevel(string text, char separator)

@@ -20,6 +20,7 @@ internal static class FirmwareInstaller
     private const string AgentFileName = "can_monitor_agent.c";
     private const long MinimumUsableBinSize = 1024;
     private const int ArtifactTimeToleranceSeconds = 3;
+    private readonly record struct XmlTagBlock(int Start, int End, string Text);
 
     public static FirmwareInstallResult Install(string projectRoot, string agentSourcePath)
     {
@@ -167,11 +168,22 @@ internal static class FirmwareInstaller
 
         if (!projectHasAgent)
         {
-            backups.Add((projectFile, Backup(projectFile)));
-            int projectInsertCount = AddAgentToKeilProject(projectFile, projectDir, agentDest, targetName);
-            result.Messages.Add(projectInsertCount > 0
-                ? $"已加入 Keil 当前 Target：{projectInsertCount} 个源码组。"
-                : "Keil 当前 Target 中已存在固件文件。");
+            AgentProjectUpdateResult projectUpdate = BuildAgentProjectUpdate(projectFile, projectDir, agentDest, targetName);
+            if (!projectUpdate.Success)
+            {
+                Rollback(backups, createdFiles);
+                result.Messages.Add(projectUpdate.Message);
+                result.Messages.Add("固件安装未完成：没有把 can_monitor_agent.c 加入当前 Keil Target，已停止，避免继续生成无效备份。");
+                result.Success = false;
+                return result;
+            }
+
+            if (projectUpdate.Added)
+            {
+                backups.Add((projectFile, Backup(projectFile)));
+                File.WriteAllText(projectFile, projectUpdate.UpdatedProjectText, Encoding.Default);
+            }
+            result.Messages.Add(projectUpdate.Message);
         }
         else
         {
@@ -507,22 +519,9 @@ internal static class FirmwareInstaller
     private static TargetOutputInfo? FindTargetOutputInfo(string projectFile, string targetName)
     {
         string text = File.ReadAllText(projectFile, Encoding.Default);
-        int pos = 0;
-        while (true)
+        foreach (XmlTagBlock target in EnumerateTopLevelTagBlocks(text, "Target"))
         {
-            int start = text.IndexOf("<Target>", pos, StringComparison.OrdinalIgnoreCase);
-            if (start < 0)
-            {
-                return null;
-            }
-
-            int end = text.IndexOf("</Target>", start, StringComparison.OrdinalIgnoreCase);
-            if (end < 0)
-            {
-                return null;
-            }
-
-            string block = text.Substring(start, end - start);
+            string block = target.Text;
             string name = ExtractTagValue(block, "TargetName");
             if (name.Equals(targetName, StringComparison.OrdinalIgnoreCase))
             {
@@ -533,9 +532,8 @@ internal static class FirmwareInstaller
                     OutputName = ExtractTagValue(block, "OutputName")
                 };
             }
-
-            pos = end + "</Target>".Length;
         }
+        return null;
     }
 
     private static string ExtractTagValue(string text, string tag)
@@ -556,6 +554,46 @@ internal static class FirmwareInstaller
         }
 
         return System.Net.WebUtility.HtmlDecode(text.Substring(start, end - start)).Trim();
+    }
+
+    private static IEnumerable<XmlTagBlock> EnumerateTopLevelTagBlocks(string text, string tag)
+    {
+        string open = "<" + tag + ">";
+        string close = "</" + tag + ">";
+        int search = 0;
+        while (true)
+        {
+            int start = text.IndexOf(open, search, StringComparison.OrdinalIgnoreCase);
+            if (start < 0)
+            {
+                yield break;
+            }
+
+            int position = start + open.Length;
+            int depth = 1;
+            while (depth > 0)
+            {
+                int nextOpen = text.IndexOf(open, position, StringComparison.OrdinalIgnoreCase);
+                int nextClose = text.IndexOf(close, position, StringComparison.OrdinalIgnoreCase);
+                if (nextClose < 0)
+                {
+                    yield break;
+                }
+
+                if (nextOpen >= 0 && nextOpen < nextClose)
+                {
+                    depth++;
+                    position = nextOpen + open.Length;
+                    continue;
+                }
+
+                depth--;
+                position = nextClose + close.Length;
+            }
+
+            yield return new XmlTagBlock(start, position, text.Substring(start, position - start));
+            search = position;
+        }
     }
 
     private static string ResolveProjectPath(string projectDir, string path)
@@ -673,31 +711,16 @@ internal static class FirmwareInstaller
 
     private static string FindTargetBlockText(string projectText, string targetName)
     {
-        int pos = 0;
-        while (true)
+        foreach (XmlTagBlock target in EnumerateTopLevelTagBlocks(projectText, "Target"))
         {
-            int start = projectText.IndexOf("<Target>", pos, StringComparison.OrdinalIgnoreCase);
-            if (start < 0)
-            {
-                return "";
-            }
-
-            int end = projectText.IndexOf("</Target>", start, StringComparison.OrdinalIgnoreCase);
-            if (end < 0)
-            {
-                return "";
-            }
-
-            int blockEnd = end + "</Target>".Length;
-            string block = projectText.Substring(start, blockEnd - start);
+            string block = target.Text;
             string name = ExtractTagValue(block, "TargetName");
             if (name.Equals(targetName, StringComparison.OrdinalIgnoreCase))
             {
                 return block;
             }
-
-            pos = blockEnd;
         }
+        return "";
     }
 
     private static bool IsProjectSourceFile(string path)
@@ -1797,13 +1820,36 @@ internal static class FirmwareInstaller
 
         string[] errorLines = logText.Replace("\r", "").Split('\n')
             .Select(x => x.Trim())
-            .Where(x => x.Contains("Error", StringComparison.OrdinalIgnoreCase))
+            .Where(IsKeilBuildErrorLine)
             .ToArray();
         return errorLines.Length > 0 && errorLines.All(line =>
             line.Contains("CanMonitor_", StringComparison.OrdinalIgnoreCase) ||
             line.Contains("Target not created", StringComparison.OrdinalIgnoreCase) ||
             line.Contains("error messages", StringComparison.OrdinalIgnoreCase) ||
             line.Contains("Error(s)", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsKeilBuildErrorLine(string line)
+    {
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return false;
+        }
+
+        bool explicitError =
+            line.Contains("Error:", StringComparison.OrdinalIgnoreCase) ||
+            line.Contains("*** Error", StringComparison.OrdinalIgnoreCase) ||
+            line.Contains("Undefined symbol", StringComparison.OrdinalIgnoreCase) ||
+            line.Contains("Target not created", StringComparison.OrdinalIgnoreCase) ||
+            line.Contains("error messages", StringComparison.OrdinalIgnoreCase) ||
+            line.Contains(" Error(s)", StringComparison.OrdinalIgnoreCase);
+        if (!explicitError)
+        {
+            return false;
+        }
+
+        return !line.Contains("0 Error(s)", StringComparison.OrdinalIgnoreCase) &&
+            !line.Contains("0 errors", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string? FindKeilUv4()
@@ -1862,7 +1908,7 @@ internal static class FirmwareInstaller
 
         string[] important = allLines
             .Where(line =>
-                line.Contains("Error", StringComparison.OrdinalIgnoreCase) ||
+                IsKeilBuildErrorLine(line) ||
                 line.Contains("Undefined symbol", StringComparison.OrdinalIgnoreCase) ||
                 line.Contains("Target not created", StringComparison.OrdinalIgnoreCase) ||
                 line.Contains("not appear after executable statement", StringComparison.OrdinalIgnoreCase) ||
@@ -1875,18 +1921,35 @@ internal static class FirmwareInstaller
         return string.Join(" | ", lines);
     }
 
-    private static int AddAgentToKeilProject(string projectFile, string projectDir, string agentPath, string targetName)
+    private sealed class AgentProjectUpdateResult
+    {
+        public bool Success { get; init; }
+        public bool Added { get; init; }
+        public string Message { get; init; } = "";
+        public string UpdatedProjectText { get; init; } = "";
+    }
+
+    private static AgentProjectUpdateResult BuildAgentProjectUpdate(string projectFile, string projectDir, string agentPath, string targetName)
     {
         string text = File.ReadAllText(projectFile, Encoding.Default);
         string targetBlock = FindTargetBlockText(text, targetName);
         if (targetBlock.Length == 0)
         {
-            return 0;
+            return new AgentProjectUpdateResult
+            {
+                Success = false,
+                Message = "未加入 Keil 当前 Target：无法解析完整 Target 块。"
+            };
         }
 
         if (targetBlock.Contains(AgentFileName, StringComparison.OrdinalIgnoreCase))
         {
-            return 0;
+            return new AgentProjectUpdateResult
+            {
+                Success = true,
+                Added = false,
+                Message = "Keil 当前 Target 中已存在固件文件，未重复添加。"
+            };
         }
 
         string relPath = MakeRelativeProjectPath(projectDir, agentPath);
@@ -1900,7 +1963,11 @@ internal static class FirmwareInstaller
         int targetStart = text.IndexOf(targetBlock, StringComparison.Ordinal);
         if (targetStart < 0)
         {
-            return 0;
+            return new AgentProjectUpdateResult
+            {
+                Success = false,
+                Message = "未加入 Keil 当前 Target：无法定位 Target 原文。"
+            };
         }
 
         int insertInBlock = FindSourceGroupFilesEnd(targetBlock);
@@ -1910,12 +1977,21 @@ internal static class FirmwareInstaller
         }
         if (insertInBlock < 0)
         {
-            return 0;
+            return new AgentProjectUpdateResult
+            {
+                Success = false,
+                Message = "未加入 Keil 当前 Target：没有找到可插入的源码 Files 节点。"
+            };
         }
 
         text = text.Insert(targetStart + insertInBlock, entry);
-        File.WriteAllText(projectFile, text, Encoding.Default);
-        return 1;
+        return new AgentProjectUpdateResult
+        {
+            Success = true,
+            Added = true,
+            Message = "已加入 Keil 当前 Target：can_monitor_agent.c。",
+            UpdatedProjectText = text
+        };
     }
 
     private static int FindSourceGroupFilesEnd(string targetBlock)

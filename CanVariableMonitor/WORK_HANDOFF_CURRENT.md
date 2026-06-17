@@ -4,7 +4,7 @@
 
 - GitHub 仓库：`https://github.com/hudonghua/can-variable-monitor.git`
 - 关键词：`上位机监控`
-- 当前源码版本号：`V1.43`
+- 当前源码版本号：`V1.5`
 - 自动更新地址：`http://8.148.250.52:9999/update_manifest.json`
 - F 盘本机测试目录：`F:\工作\AI模型\s上位机\监控上位机\上位机\上位机监控_V1.2_20260612_120554`
 
@@ -221,6 +221,43 @@ can_monitor_latest.zip
   - 江南爆破中深孔编码器铁轮版：强制 `Shovels_up_DO=1` 后 `PWM_3A_119_CAN1=600`。
   - 旭工干喷：强制 `Main_Pump_Current_up_DI=1` 后 `Paramet_Set1=5`。
   - 华矿二代半液压主控：强制 `Hydraulic_Temperature_control_DI=1` 后 `Hydraulic_Temperature_control_DI_dly=499`。
+
+## 2026-06-18 V1.5 发布与四工程内测
+
+本轮修正了一个真实“半安装”失败态：客户工程里已经存在 `Src\can_monitor_agent.c`、`CanMonitor_Process()` 和 `CanMonitor_BusinessGate()` 钩子，但老 `.uvproj` 的 `FLASH` Target 没有包含 `can_monitor_agent.c`，Keil 链接报 `Undefined symbol CanMonitor_Process / CanMonitor_BusinessGate`。旧安装器又把 `0 errors` 汇总行误当错误行，导致没有进入监控固件修复模式。
+
+本轮修正：
+
+- `FirmwareInstaller.FindTargetBlockText()` 和 `FindTargetOutputInfo()` 改为按嵌套深度解析 `<Target>...</Target>`。老 Keil `.uvproj` 内部有子 `<Target>` 节点，不能用第一个 `</Target>` 截断。
+- `KeilBuildService.FindTargetOutputInfo()` 同步改为深度解析，避免手动编译服务在同类工程上拿到截断 Target。
+- `FirmwareInstaller.BuildAgentProjectUpdate()` 不再把“插入失败”误报为“当前 Target 已存在固件文件”；无法加入 Target 时会停止并提示，不继续制造无效备份。
+- `IsMonitorLinkOnlyFailure()` 过滤 Keil 错误行时忽略 `0 errors` / `0 Error(s)` 汇总行，只把真正错误、undefined、Target not created、error messages 纳入判断。
+- 增加隐藏命令行探针 `--firmware-install-probe <工程目录>`，用于在复制工程上跑刷新/固件安装逻辑并写出 `%APPDATA%\CanVariableMonitor\firmware_install_probe.log`。
+
+四个复制工程内测结果：
+
+- 劈裂车：`P_split`，先复现旧钩子链接失败，再自动加入 `can_monitor_agent.c` 到 `FLASH` Target，Keil 编译通过，bin `68224` 字节；第二轮刷新显示“本次未做任何修改”。
+- 江南爆破中深孔编码器铁轮版：`T_mining`，固件刷新通过，bin `71508` 字节；第二轮刷新幂等。
+- 旭工干喷：`X_dry_spray`，固件刷新通过，bin `71352` 字节；第二轮刷新幂等。
+- 华矿二代半液压主控：`H_huakuang`，固件刷新通过，bin `92408` 字节；第二轮刷新幂等。
+
+离线内测结果：
+
+- `OfflineWorkerSelfTest.ps1`：通过。
+- `OfflineRealProjectProbe.ps1` 四个复制工程均通过，均自动提取 `__canmon_main_loop_tick`。
+- 应用层 source 数：劈裂车 33、江南爆破 36、旭工干喷 32、华矿 60。
+- 强制分支检查均通过：`Engine_Start_Network_dly -> Engine_Start_DO`、`Shovels_up_DO -> PWM_3A_119_CAN1`、`Main_Pump_Current_up_DI -> Paramet_Set1`、`Hydraulic_Temperature_control_DI -> Hydraulic_Temperature_control_DI_dly`。
+
+发布结果：
+
+- 本地发布目录：`CanVariableMonitor\dist\上位机监控`
+- F 盘同步目录：`F:\工作\AI模型\s上位机\监控上位机\上位机\上位机监控_V1.2_20260612_120554`
+- 版本包：`CanVariableMonitor\release\上位机监控_V1.5_20260618_073140.zip`
+- 服务器根目录已更新：`http://8.148.250.52:9999/update_manifest.json` 和 `can_monitor_latest.zip`
+- 服务器 manifest 版本：`V1.5`
+- `can_monitor_latest.zip` SHA256：`057e5cfdcc327b12303b3302228673af9f1c93703e9a0d54ba71d37b6b3cdb7a`
+- 发布 zip 检查：主 exe、offline worker、tinycc 均在包内；源码/调试文件泄漏数为 0。
+- 发布目录 exe 自测：`--syntax-highlight-self-test` 和 `--source-edit-self-test` 均通过。
 
 ## 绝对不要上传的内容
 

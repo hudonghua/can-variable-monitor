@@ -20,7 +20,7 @@ namespace CanVariableMonitor;
 
 public sealed partial class MainForm : Form
 {
-	private const string UpperComputerVersion = "V1.43";
+	private const string UpperComputerVersion = "V1.5";
 
 	private const string AppDisplayName = "上位机监控";
 
@@ -43,6 +43,8 @@ public sealed partial class MainForm : Form
 	private readonly record struct InlineValueSpan(int Start, int Length, bool Fresh);
 
 	private readonly record struct CodeTokenStyleSpan(int Start, int Length, CodeTokenVisualKind Kind);
+
+	private readonly record struct KeilTextLine(string Content, string Ending, int Start, int End);
 
 	private readonly record struct ScintillaValueAnnotationRow(int LineIndex, string Text);
 
@@ -404,8 +406,6 @@ public sealed partial class MainForm : Form
 
 	private int _lastScintillaScopeCaret = -1;
 
-	private int _lastScintillaHoverLine = -1;
-
 	private string _lastFunctionHoverContextName = "";
 
 	private DateTime _lastFunctionHoverContextUtc;
@@ -449,6 +449,10 @@ public sealed partial class MainForm : Form
 	private string _activeProgramSearchKeyword = "";
 
 	private int _activeProgramSearchLine;
+
+	private string _lockedBuildDiagnosticFilePath = "";
+
+	private int _lockedBuildDiagnosticLine;
 
 	private string _programTreeLocateTargetFunction = "";
 
@@ -710,7 +714,7 @@ public sealed partial class MainForm : Form
 
 	private bool ShouldShowInlineCodeValues()
 	{
-		return _running;
+		return _running || _offlineSimulation;
 	}
 
 	private const int FunctionCodeWheelDeferMs = 320;
@@ -745,11 +749,15 @@ public sealed partial class MainForm : Form
 
 	private const int ScintillaIndicatorValueFreshBorder = 32;
 
+	private const int ScintillaIndicatorIdentifierReference = 33;
+
 	private const int ScintillaMarkerTrueLine = 8;
 
 	private const int ScintillaMarkerSearchLine = 9;
 
 	private const int ScintillaMarkerHoverLine = 10;
+
+	private const int ScintillaMarkerBuildDiagnosticLine = 11;
 
 	private const int ScintillaValueMarginIndex = 1;
 
@@ -772,6 +780,8 @@ public sealed partial class MainForm : Form
 	private const int SciEolAnnotationHidden = 0x0;
 
 	private const int SciEolAnnotationStandard = 0x1;
+
+	private const int SciSetCaretLineVisible = 2096;
 
 	private const int FunctionCodeContextBeforeLines = 90;
 
@@ -984,6 +994,8 @@ public sealed partial class MainForm : Form
 		MinimumSize = GetSafeMinimumSize();
 		base.StartPosition = FormStartPosition.CenterScreen;
 		WindowState = FormWindowState.Maximized;
+		KeyPreview = true;
+		KeyDown += MainFormKeyDown;
 		BackColor = _bg;
 		Font = new Font("Microsoft YaHei UI", 9f);
 		BuildUi();
@@ -2767,7 +2779,7 @@ public sealed partial class MainForm : Form
 			UseTabs = false,
 			TabIndents = true,
 			BackspaceUnindents = true,
-			IndentationGuides = ScintillaNET.IndentView.LookBoth,
+			IndentationGuides = ScintillaNET.IndentView.None,
 			Font = CreateCodeFont(_functionCodeFontSize),
 			BackColor = _surface,
 			ForeColor = _ink,
@@ -2787,6 +2799,7 @@ public sealed partial class MainForm : Form
 		};
 		editor.MouseWheel += CodeEditorMouseWheel;
 		editor.KeyDown += CodeEditorKeyDown;
+		editor.KeyPress += CodeEditorKeyPress;
 		editor.CharAdded += CodeEditorCharAdded;
 		editor.TextChanged += CodeEditorTextChanged;
 		editor.UpdateUI += CodeEditorUpdateUI;
@@ -2841,8 +2854,8 @@ public sealed partial class MainForm : Form
 		editor.CaretWidth = 2;
 		editor.CaretPeriod = 520;
 		editor.CaretForeColor = IsCurrentLightTheme() ? Color.FromArgb(16, 24, 39) : Color.FromArgb(248, 250, 252);
-		editor.CaretLineVisible = false;
-		editor.CaretLineBackColor = Color.FromArgb(0, _surface);
+		editor.DirectMessage(SciSetCaretLineVisible, new IntPtr(1), IntPtr.Zero);
+		editor.CaretLineBackColor = IsCurrentLightTheme() ? Color.FromArgb(150, 232, 252, 238) : Color.FromArgb(150, 24, 60, 43);
 		editor.CaretLineLayer = ScintillaNET.Layer.UnderText;
 		Color selectionBackColor = IsCurrentLightTheme()
 			? MixColor(_surface, _accent, 0.36f)
@@ -2862,6 +2875,8 @@ public sealed partial class MainForm : Form
 		editor.Markers[ScintillaMarkerSearchLine].SetBackColor(_programSearchLineBackColor);
 		editor.Markers[ScintillaMarkerHoverLine].Symbol = ScintillaNET.MarkerSymbol.Background;
 		editor.Markers[ScintillaMarkerHoverLine].SetBackColor(IsCurrentLightTheme() ? Color.FromArgb(220, 252, 231) : Color.FromArgb(30, 76, 50));
+		editor.Markers[ScintillaMarkerBuildDiagnosticLine].Symbol = ScintillaNET.MarkerSymbol.Background;
+		editor.Markers[ScintillaMarkerBuildDiagnosticLine].SetBackColor(IsCurrentLightTheme() ? Color.FromArgb(254, 226, 226) : Color.FromArgb(86, 36, 36));
 		editor.Indicators[ScintillaIndicatorFocus].Style = ScintillaNET.IndicatorStyle.RoundBox;
 		editor.Indicators[ScintillaIndicatorFocus].ForeColor = _codeFocusVariableBackColor;
 		editor.Indicators[ScintillaIndicatorFocus].Alpha = 90;
@@ -2919,6 +2934,11 @@ public sealed partial class MainForm : Form
 		editor.Indicators[ScintillaIndicatorTrueCondition].Alpha = 150;
 		editor.Indicators[ScintillaIndicatorTrueCondition].OutlineAlpha = 255;
 		editor.Indicators[ScintillaIndicatorTrueCondition].Under = false;
+		editor.Indicators[ScintillaIndicatorIdentifierReference].Style = ScintillaNET.IndicatorStyle.RoundBox;
+		editor.Indicators[ScintillaIndicatorIdentifierReference].ForeColor = IsCurrentLightTheme() ? Color.FromArgb(14, 165, 233) : Color.FromArgb(125, 211, 252);
+		editor.Indicators[ScintillaIndicatorIdentifierReference].Alpha = 55;
+		editor.Indicators[ScintillaIndicatorIdentifierReference].OutlineAlpha = 130;
+		editor.Indicators[ScintillaIndicatorIdentifierReference].Under = true;
 		editor.ScrollWidthTracking = true;
 	}
 
@@ -12177,6 +12197,7 @@ public sealed partial class MainForm : Form
 		};
 		menu.Items.Add(titleItem);
 		menu.Items.Add(new ToolStripSeparator());
+		int codeContextAbsoluteLine = GetCodeContextAbsoluteLine(owner, location);
 
 		ToolStripMenuItem copySelection = new ToolStripMenuItem("复制");
 		copySelection.Enabled = !string.IsNullOrEmpty(GetSelectedCodeText(owner));
@@ -12207,7 +12228,7 @@ public sealed partial class MainForm : Form
 		{
 			if (TryResolveSourceSymbolFromCodeEditor(identifier, out SourceSymbol symbol) && (symbol.Definition ?? symbol.Declaration) is SourceLocation location)
 			{
-				NavigateToSourceLocation(location.FilePath, location.Line, pushCurrent: _currentFunctionSource != null);
+				TryNavigateToSourceLocation(location.FilePath, location.Line, pushCurrent: _currentFunctionSource != null, actionName: "跳转定义");
 			}
 			else if (!TryGotoDefinitionFromIdentifier(identifier))
 			{
@@ -12226,7 +12247,7 @@ public sealed partial class MainForm : Form
 			{
 				if (sourceSymbol.Declaration is SourceLocation location)
 				{
-					NavigateToSourceLocation(location.FilePath, location.Line, pushCurrent: _currentFunctionSource != null);
+					TryNavigateToSourceLocation(location.FilePath, location.Line, pushCurrent: _currentFunctionSource != null, actionName: "跳转声明");
 				}
 			};
 			menu.Items.Add(gotoDeclaration);
@@ -12245,7 +12266,7 @@ public sealed partial class MainForm : Form
 			declareLocal.Enabled = !string.IsNullOrWhiteSpace(identifier) && !hasSourceSymbol;
 			declareLocal.Click += delegate
 			{
-				DeclareLocalVariableFromCode(identifier);
+				DeclareLocalVariableFromCode(identifier, codeContextAbsoluteLine);
 			};
 			menu.Items.Add(declareLocal);
 
@@ -12350,6 +12371,30 @@ public sealed partial class MainForm : Form
 		};
 	}
 
+	private int GetCodeContextAbsoluteLine(Control owner, Point location)
+	{
+		FunctionSourceView? codeView = GetCodeViewSource();
+		if (codeView == null)
+		{
+			return 0;
+		}
+
+		if (owner is Scintilla editor && !editor.IsDisposed && editor.TextLength > 0)
+		{
+			int lineIndex = GetScintillaLineFromPoint(editor, location);
+			return codeView.StartLine + Math.Clamp(lineIndex, 0, Math.Max(0, editor.Lines.Count - 1));
+		}
+
+		if (owner is RichTextBox box && !box.IsDisposed && box.TextLength > 0)
+		{
+			int charIndex = box.GetCharIndexFromPosition(location);
+			int lineIndex = Math.Clamp(box.GetLineFromCharIndex(charIndex), 0, Math.Max(0, box.Lines.Length - 1));
+			return codeView.StartLine + lineIndex;
+		}
+
+		return 0;
+	}
+
 	private bool TryGotoDefinitionFromIdentifier(string identifier)
 	{
 		string name = NormalizeFocusedVariableName(identifier);
@@ -12362,6 +12407,11 @@ public sealed partial class MainForm : Form
 			TryLoadFunctionSource(_workDirectory, name, out FunctionSourceView? functionSource) &&
 			functionSource != null)
 		{
+			if (!CanNavigateSourceLocation(functionSource.FilePath, functionSource.StartLine, "跳转定义"))
+			{
+				return true;
+			}
+
 			ShowFunctionSource(functionSource, pushCurrent: _currentFunctionSource != null, clearForward: true);
 			SelectApproximateLineInFunction(functionSource.StartLine);
 			return true;
@@ -12369,6 +12419,11 @@ public sealed partial class MainForm : Form
 
 		if (TryFindIdentifierDefinitionInSource(name, out ProgramSearchResult result))
 		{
+			if (!CanNavigateKeilSearchResult(result))
+			{
+				return true;
+			}
+
 			NavigateToProgramSearchResult(result, name, pushCurrent: _currentFunctionSource != null);
 			return true;
 		}
@@ -12677,26 +12732,11 @@ public sealed partial class MainForm : Form
 
 	private void UpdateScintillaHoverLine(Point location)
 	{
-		if (_codeEditor == null || _codeEditor.IsDisposed || _codeEditor.TextLength == 0)
-		{
-			ClearScintillaHoverLine();
-			return;
-		}
-
-		int lineIndex = GetScintillaLineFromPoint(_codeEditor, location);
-		if (lineIndex == _lastScintillaHoverLine)
-		{
-			return;
-		}
-
-		_codeEditor.MarkerDeleteAll(ScintillaMarkerHoverLine);
-		_codeEditor.Lines[lineIndex].MarkerAdd(ScintillaMarkerHoverLine);
-		_lastScintillaHoverLine = lineIndex;
+		ClearScintillaHoverLine();
 	}
 
 	private void ClearScintillaHoverLine()
 	{
-		_lastScintillaHoverLine = -1;
 		if (_codeEditor == null || _codeEditor.IsDisposed)
 		{
 			return;
@@ -12712,7 +12752,7 @@ public sealed partial class MainForm : Form
 			ClearScintillaHoverLine();
 			return;
 		}
-		UpdateScintillaHoverLine(e.Location);
+		ClearScintillaHoverLine();
 		if (AreCodeInteractionSideEffectsSuppressed())
 		{
 			ClearScintillaFunctionHoverHighlight();
@@ -12767,8 +12807,498 @@ public sealed partial class MainForm : Form
 		ScheduleVisibleDataRefreshAfterScroll();
 	}
 
+	private void MainFormKeyDown(object? sender, KeyEventArgs e)
+	{
+		if (IsKeilFindShortcut(e.KeyCode, e.Control, e.Shift, e.Alt))
+		{
+			e.SuppressKeyPress = true;
+			e.Handled = true;
+			FocusKeilProgramSearchFromCode();
+			return;
+		}
+
+		if (IsKeilFindNextShortcut(e.KeyCode, e.Control, e.Alt))
+		{
+			e.SuppressKeyPress = true;
+			e.Handled = true;
+			NavigateKeilSearchResult(e.Shift ? -1 : 1);
+			return;
+		}
+
+		if (IsKeilGotoMatchingBraceShortcut(e.KeyCode, e.Control, e.Shift, e.Alt))
+		{
+			e.SuppressKeyPress = true;
+			e.Handled = true;
+			GotoKeilMatchingBrace();
+			return;
+		}
+
+		if (IsKeilGotoDefinitionShortcut(e.KeyCode, e.Control, e.Shift, e.Alt) &&
+			TryGotoKeilDefinitionAtCaret())
+		{
+			e.SuppressKeyPress = true;
+			e.Handled = true;
+			return;
+		}
+
+		if (IsKeilGotoLineShortcut(e.KeyCode, e.Control, e.Shift, e.Alt))
+		{
+			e.SuppressKeyPress = true;
+			e.Handled = true;
+			ShowKeilGotoLineDialog();
+			return;
+		}
+
+		if (!IsKeilManualBuildShortcut(e.KeyCode, e.Control, e.Shift, e.Alt))
+		{
+			return;
+		}
+		e.SuppressKeyPress = true;
+		e.Handled = true;
+		_ = RunManualSourceBuildAsync();
+	}
+
+	private static bool IsKeilFindShortcut(Keys keyCode, bool control, bool shift, bool alt)
+	{
+		return keyCode == Keys.F && control && !shift && !alt;
+	}
+
+	private static bool IsKeilFindNextShortcut(Keys keyCode, bool control, bool alt)
+	{
+		return keyCode == Keys.F3 && !control && !alt;
+	}
+
+	private static bool IsKeilGotoMatchingBraceShortcut(Keys keyCode, bool control, bool shift, bool alt)
+	{
+		return keyCode == Keys.E && control && !shift && !alt;
+	}
+
+	private static bool IsKeilGotoDefinitionShortcut(Keys keyCode, bool control, bool shift, bool alt)
+	{
+		return keyCode == Keys.F12 && !control && !shift && !alt;
+	}
+
+	private static bool IsKeilGotoLineShortcut(Keys keyCode, bool control, bool shift, bool alt)
+	{
+		return keyCode == Keys.G && control && !shift && !alt;
+	}
+
+	private static bool IsKeilManualBuildShortcut(Keys keyCode, bool control, bool shift, bool alt)
+	{
+		return keyCode == Keys.F7 && !control && !shift && !alt;
+	}
+
+	private void FocusKeilProgramSearchFromCode()
+	{
+		if (_programSearchBox == null)
+		{
+			return;
+		}
+
+		string findText = GetKeilFindSeedText();
+		if (!string.IsNullOrWhiteSpace(findText))
+		{
+			_programSearchBox.Text = findText;
+		}
+
+		_programSearchBox.Focus();
+		_programSearchBox.SelectAll();
+	}
+
+	private string GetKeilFindSeedText()
+	{
+		string selectedText = _codeEditor != null && !_codeEditor.IsDisposed
+			? _codeEditor.SelectedText
+			: _functionCodeBox?.SelectedText ?? "";
+		string normalized = NormalizeKeilFindSeedText(selectedText);
+		if (!string.IsNullOrWhiteSpace(normalized))
+		{
+			return normalized;
+		}
+
+		if (_codeEditor != null &&
+			!_codeEditor.IsDisposed &&
+			TryGetIdentifierAt(_codeEditor.Text, Math.Clamp(_codeEditor.CurrentPosition, 0, Math.Max(0, _codeEditor.TextLength - 1)), out _, out _, out string identifier) &&
+			!IsCKeyword(identifier))
+		{
+			return identifier;
+		}
+
+		if (_functionCodeBox != null &&
+			TryGetIdentifierAt(_functionCodeBox.Text, Math.Clamp(_functionCodeBox.SelectionStart, 0, Math.Max(0, _functionCodeBox.TextLength - 1)), out _, out _, out identifier) &&
+			!IsCKeyword(identifier))
+		{
+			return identifier;
+		}
+
+		return "";
+	}
+
+	private static string NormalizeKeilFindSeedText(string text)
+	{
+		if (string.IsNullOrWhiteSpace(text))
+		{
+			return "";
+		}
+
+		string normalized = text.Replace("\r\n", " ", StringComparison.Ordinal).Replace('\r', ' ').Replace('\n', ' ').Trim();
+		normalized = Regex.Replace(normalized, @"\s+", " ");
+		return normalized.Length <= 128 ? normalized : normalized[..128];
+	}
+
+	private void NavigateKeilSearchResult(int step)
+	{
+		if (_programSearchBox == null || _programSearchResults == null)
+		{
+			return;
+		}
+
+		string keyword = _programSearchBox.Text.Trim();
+		if (keyword.Length == 0)
+		{
+			FocusKeilProgramSearchFromCode();
+			keyword = _programSearchBox.Text.Trim();
+		}
+		if (keyword.Length == 0)
+		{
+			return;
+		}
+
+		if (_programSearchResults.Items.Count == 0)
+		{
+			RunProgramSearch();
+		}
+		if (_programSearchResults.Items.Count == 0)
+		{
+			return;
+		}
+
+		int index = GetNextKeilSearchResultIndex(_programSearchResults.Items.Count, _programSearchResults.SelectedIndex, step);
+		if (index < 0 || _programSearchResults.Items[index] is not ProgramSearchResult result)
+		{
+			return;
+		}
+
+		_programSearchResults.SelectedIndex = index;
+		_programSearchResults.TopIndex = Math.Clamp(index, 0, Math.Max(0, _programSearchResults.Items.Count - 1));
+		if (!CanNavigateKeilSearchResult(result))
+		{
+			return;
+		}
+
+		NavigateToProgramSearchResult(result, keyword, pushCurrent: _currentFunctionSource != null);
+	}
+
+	private bool CanNavigateKeilSearchResult(ProgramSearchResult result)
+	{
+		return CanNavigateSourceLocation(result.FilePath, result.LineNumber, "查找跳转");
+	}
+
+	private static int GetNextKeilSearchResultIndex(int count, int selectedIndex, int step)
+	{
+		if (count <= 0 || step == 0)
+		{
+			return -1;
+		}
+		if (selectedIndex < 0 || selectedIndex >= count)
+		{
+			return step > 0 ? 0 : count - 1;
+		}
+		int next = (selectedIndex + step) % count;
+		return next < 0 ? next + count : next;
+	}
+
+	private void GotoKeilMatchingBrace()
+	{
+		if (_codeEditor == null || _codeEditor.IsDisposed || !_codeEditor.ContainsFocus)
+		{
+			return;
+		}
+
+		if (!TryGetKeilMatchingBraceJumpPosition(_codeEditor.Text, _codeEditor.CurrentPosition, out _, out int target))
+		{
+			UpdateSourceEditStatus("光标不在可匹配括号旁", _muted);
+			return;
+		}
+
+		_codeEditor.Focus();
+		_codeEditor.GotoPosition(Math.Clamp(target, 0, _codeEditor.TextLength));
+		_codeEditor.ScrollCaret();
+		UpdateScintillaScopeHighlight(force: true);
+		UpdateSourceEditStatus("已跳转到匹配括号", _accent);
+	}
+
+	private bool TryNavigateToSourceLocation(string filePath, int lineNumber, bool pushCurrent, string actionName)
+	{
+		if (!CanNavigateSourceLocation(filePath, lineNumber, actionName))
+		{
+			return false;
+		}
+
+		NavigateToSourceLocation(filePath, lineNumber, pushCurrent);
+		return true;
+	}
+
+	private bool CanNavigateSourceLocation(string filePath, int lineNumber, string actionName)
+	{
+		if (_sourceEditSession?.Dirty != true)
+		{
+			return true;
+		}
+
+		FunctionSourceView? codeView = GetCodeViewSource();
+		if (codeView != null &&
+			SourcePathsEqual(filePath, codeView.FilePath) &&
+			lineNumber >= codeView.StartLine &&
+			lineNumber <= GetSourceEndLine(codeView))
+		{
+			return true;
+		}
+
+		string action = string.IsNullOrWhiteSpace(actionName) ? "跳转" : actionName;
+		UpdateSourceEditStatus("先保存再" + action, Color.FromArgb(245, 158, 11));
+		Log($"源码未保存，已取消{action}。请先 Ctrl+S 保存。");
+		return false;
+	}
+
+	private bool TryGotoKeilDefinitionAtCaret()
+	{
+		if (_codeEditor != null && !_codeEditor.IsDisposed && _codeEditor.ContainsFocus)
+		{
+			if (!TryGetKeilIdentifierAtCaret(_codeEditor.Text, _codeEditor.CurrentPosition, out _, out _, out string identifier))
+			{
+				UpdateSourceEditStatus("光标不在可跳转标识符上", _muted);
+				return true;
+			}
+
+			FocusVariableAcrossPanels(identifier, updateSearchBox: false);
+			if (TryResolveSourceSymbolAtScintillaPosition(_codeEditor.CurrentPosition, identifier, out SourceSymbol symbol) &&
+				(symbol.Definition ?? symbol.Declaration) is SourceLocation location)
+			{
+				TryNavigateToSourceLocation(location.FilePath, location.Line, _currentFunctionSource != null, "跳转定义");
+				return true;
+			}
+
+			return TryGotoKeilDefinitionFallback(identifier);
+		}
+
+		if (_functionCodeBox != null && !_functionCodeBox.IsDisposed && _functionCodeBox.ContainsFocus)
+		{
+			if (!TryGetKeilIdentifierAtCaret(_functionCodeBox.Text, _functionCodeBox.SelectionStart, out _, out _, out string identifier))
+			{
+				UpdateSourceEditStatus("光标不在可跳转标识符上", _muted);
+				return true;
+			}
+
+			FocusVariableAcrossPanels(identifier, updateSearchBox: false);
+			return TryGotoKeilDefinitionFallback(identifier);
+		}
+
+		return false;
+	}
+
+	private bool TryGotoKeilDefinitionFallback(string identifier)
+	{
+		if (TryGotoDefinitionFromIdentifier(identifier))
+		{
+			UpdateSourceEditStatus("已跳转到定义", _accent);
+			return true;
+		}
+
+		FillProgramSearchFromCode(identifier);
+		RunProgramSearch();
+		UpdateSourceEditStatus("未直接定位，已搜索标识符", _muted);
+		return true;
+	}
+
+	private void ShowKeilGotoLineDialog()
+	{
+		FunctionSourceView? codeView = GetCodeViewSource() ?? _currentFunctionSource;
+		if (codeView == null)
+		{
+			UpdateSourceEditStatus("没有可跳转源码", _muted);
+			return;
+		}
+
+		int sourceStart = Math.Max(1, codeView.StartLine);
+		int sourceEnd = GetSourceEndLine(codeView);
+		int currentLine = GetCurrentCodeViewAbsoluteLine(codeView);
+		string? input = PromptForText(
+			"跳转到行",
+			$"源码行号 ({sourceStart}-{sourceEnd})：",
+			currentLine.ToString(CultureInfo.InvariantCulture));
+		if (string.IsNullOrWhiteSpace(input))
+		{
+			return;
+		}
+
+		if (!TryParseKeilGotoLineNumber(input, out int absoluteLine))
+		{
+			UpdateSourceEditStatus("行号无效", Color.FromArgb(248, 113, 113));
+			Log("跳转行号无效：" + input);
+			return;
+		}
+
+		if (absoluteLine >= sourceStart && absoluteLine <= sourceEnd)
+		{
+			_activeProgramSearchLine = absoluteLine;
+			SelectApproximateLineInFunction(absoluteLine);
+			RenderDataFunctionMirror(resetScroll: false);
+			UpdateSourceEditStatus($"已跳转到 {absoluteLine} 行", _accent);
+			return;
+		}
+
+		if (_sourceEditSession?.Dirty == true)
+		{
+			UpdateSourceEditStatus("先保存再跳转到视图外行", Color.FromArgb(245, 158, 11));
+			Log("源码未保存，已取消视图外行跳转。请先 Ctrl+S 保存。");
+			return;
+		}
+
+		NavigateToSourceLocation(codeView.FilePath, absoluteLine, pushCurrent: _currentFunctionSource != null);
+		UpdateSourceEditStatus($"已跳转到 {absoluteLine} 行", _accent);
+	}
+
+	private int GetCurrentCodeViewAbsoluteLine(FunctionSourceView codeView)
+	{
+		if (_codeEditor != null && !_codeEditor.IsDisposed && _codeEditor.Lines.Count > 0)
+		{
+			int position = Math.Clamp(_codeEditor.CurrentPosition, 0, Math.Max(0, _codeEditor.TextLength));
+			int lineIndex = Math.Clamp(_codeEditor.LineFromPosition(position), 0, Math.Max(0, _codeEditor.Lines.Count - 1));
+			return codeView.StartLine + lineIndex;
+		}
+
+		if (_activeProgramSearchLine >= codeView.StartLine && _activeProgramSearchLine <= GetSourceEndLine(codeView))
+		{
+			return _activeProgramSearchLine;
+		}
+
+		return codeView.StartLine;
+	}
+
+	private static bool TryParseKeilGotoLineNumber(string text, out int line)
+	{
+		line = 0;
+		if (string.IsNullOrWhiteSpace(text))
+		{
+			return false;
+		}
+
+		string trimmed = text.Trim();
+		if (int.TryParse(trimmed, NumberStyles.Integer, CultureInfo.InvariantCulture, out line))
+		{
+			return line > 0;
+		}
+
+		Match labelMatch = Regex.Match(trimmed, @"(?:line|行)\s*[:：]?\s*(?<line>\d+)", RegexOptions.IgnoreCase);
+		if (labelMatch.Success &&
+			int.TryParse(labelMatch.Groups["line"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out line))
+		{
+			return line > 0;
+		}
+
+		Match pathMatch = Regex.Match(trimmed, @"[:：](?<line>\d+)(?:\D|$)");
+		return pathMatch.Success &&
+			int.TryParse(pathMatch.Groups["line"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out line) &&
+			line > 0;
+	}
+
 	private void CodeEditorKeyDown(object? sender, KeyEventArgs e)
 	{
+		if (_codeEditor != null && !_codeEditor.IsDisposed && !e.Control && !e.Alt)
+		{
+			if (!e.Shift && e.KeyCode == Keys.Enter && TryApplyKeilSmartPairEnter(_codeEditor))
+			{
+				e.SuppressKeyPress = true;
+				e.Handled = true;
+				return;
+			}
+
+			if (e.KeyCode == Keys.Tab)
+			{
+				ApplyKeilTabIndent(_codeEditor, unindent: e.Shift);
+				e.SuppressKeyPress = true;
+				e.Handled = true;
+				return;
+			}
+
+			if (e.KeyCode == Keys.Back && TryApplyKeilPairedBackspace(_codeEditor))
+			{
+				e.SuppressKeyPress = true;
+				e.Handled = true;
+				return;
+			}
+
+			if (e.KeyCode == Keys.Back && TryApplyKeilBackspaceIndent(_codeEditor))
+			{
+				e.SuppressKeyPress = true;
+				e.Handled = true;
+				return;
+			}
+
+			if (e.KeyCode == Keys.Home && TryApplyKeilSmartHome(_codeEditor, extendSelection: e.Shift))
+			{
+				e.SuppressKeyPress = true;
+				e.Handled = true;
+				return;
+			}
+		}
+
+		if (_codeEditor != null && !_codeEditor.IsDisposed && e.Control && !e.Alt)
+		{
+			if (e.Shift && (e.KeyCode == Keys.OemQuestion || e.KeyCode == Keys.Divide))
+			{
+				if (ToggleKeilBlockCommentSelection(_codeEditor))
+				{
+					e.SuppressKeyPress = true;
+					e.Handled = true;
+				}
+				return;
+			}
+
+			if (!e.Shift && (e.KeyCode == Keys.OemQuestion || e.KeyCode == Keys.Divide))
+			{
+				ToggleKeilLineComment(_codeEditor);
+				e.SuppressKeyPress = true;
+				e.Handled = true;
+				return;
+			}
+
+			if (!e.Shift && e.KeyCode == Keys.Y)
+			{
+				DeleteKeilCurrentLines(_codeEditor);
+				e.SuppressKeyPress = true;
+				e.Handled = true;
+				return;
+			}
+
+			if (!e.Shift && e.KeyCode == Keys.D)
+			{
+				DuplicateKeilCurrentLines(_codeEditor);
+				e.SuppressKeyPress = true;
+				e.Handled = true;
+				return;
+			}
+
+			if (!e.Shift && e.KeyCode == Keys.I)
+			{
+				SmartIndentKeilCurrentLines(_codeEditor);
+				e.SuppressKeyPress = true;
+				e.Handled = true;
+				return;
+			}
+
+			if (!e.Shift && e.KeyCode == Keys.V)
+			{
+				if (PasteKeilNormalizedClipboard(_codeEditor))
+				{
+					e.SuppressKeyPress = true;
+					e.Handled = true;
+				}
+				return;
+			}
+		}
+
 		if (e.Control && e.KeyCode == Keys.S)
 		{
 			_sourceEditSaveTimer.Stop();
@@ -12799,12 +13329,97 @@ public sealed partial class MainForm : Form
 		}
 	}
 
+	private bool PasteKeilNormalizedClipboard(Scintilla editor)
+	{
+		if (editor.ReadOnly || !Clipboard.ContainsText(TextDataFormat.Text))
+		{
+			return false;
+		}
+
+		string clipboardText;
+		try
+		{
+			clipboardText = Clipboard.GetText(TextDataFormat.Text);
+		}
+		catch (ExternalException)
+		{
+			return false;
+		}
+
+		if (string.IsNullOrEmpty(clipboardText))
+		{
+			return false;
+		}
+
+		string replacement = BuildKeilPasteText(
+			clipboardText,
+			editor.Text,
+			editor.SelectionStart,
+			editor.SelectionEnd,
+			GetKeilIndentWidth(editor),
+			_sourceEditSession?.Buffer.NewLine ?? DetectKeilEditorNewLine(editor.Text));
+		if (replacement.Length == 0)
+		{
+			return false;
+		}
+
+		int start = Math.Clamp(Math.Min(editor.SelectionStart, editor.SelectionEnd), 0, editor.TextLength);
+		int end = Math.Clamp(Math.Max(editor.SelectionStart, editor.SelectionEnd), 0, editor.TextLength);
+		editor.BeginUndoAction();
+		try
+		{
+			if (end > start)
+			{
+				editor.DeleteRange(start, end - start);
+			}
+			editor.InsertText(start, replacement);
+			editor.GotoPosition(Math.Clamp(start + replacement.Length, 0, editor.TextLength));
+		}
+		finally
+		{
+			editor.EndUndoAction();
+		}
+		return true;
+	}
+
+	private void CodeEditorKeyPress(object? sender, KeyPressEventArgs e)
+	{
+		if (_sourceEditInternalTextChange ||
+			sender is not Scintilla editor ||
+			editor.IsDisposed ||
+			(ModifierKeys & (Keys.Control | Keys.Alt)) != Keys.None)
+		{
+			return;
+		}
+
+		if (TryApplyKeilSelectionAutoPair(editor, e.KeyChar))
+		{
+			e.Handled = true;
+		}
+	}
+
 	private void CodeEditorCharAdded(object? sender, ScintillaNET.CharAddedEventArgs e)
 	{
 		if (_sourceEditInternalTextChange ||
-			e.Char != '\n' ||
 			sender is not Scintilla editor ||
 			editor.IsDisposed)
+		{
+			return;
+		}
+
+		char typedChar = (char)e.Char;
+		if (TryApplyKeilAutoPairAfterCharAdded(editor, typedChar))
+		{
+			return;
+		}
+
+		if (typedChar == '}')
+		{
+			TryApplyKeilClosingBraceOutdent(editor);
+			return;
+		}
+
+		if (typedChar != '\n')
 		{
 			return;
 		}
@@ -12816,13 +13431,7 @@ public sealed partial class MainForm : Form
 		}
 
 		string previousLine = editor.Lines[lineIndex - 1].Text.TrimEnd('\r', '\n');
-		string indent = GetLeadingWhitespace(previousLine);
-		string trimmedPrevious = previousLine.TrimEnd();
-		if (trimmedPrevious.EndsWith("{", StringComparison.Ordinal))
-		{
-			indent += new string(' ', Math.Max(1, editor.IndentWidth));
-		}
-
+		string indent = BuildKeilNewLineIndent(previousLine, GetKeilIndentWidth(editor));
 		if (indent.Length == 0)
 		{
 			return;
@@ -12844,11 +13453,1468 @@ public sealed partial class MainForm : Form
 		return index == 0 ? "" : text[..index];
 	}
 
+	private static int GetKeilIndentWidth(Scintilla editor)
+	{
+		return Math.Max(1, editor.IndentWidth > 0 ? editor.IndentWidth : 2);
+	}
+
+	private static string BuildKeilNewLineIndent(string previousLine, int indentWidth)
+	{
+		indentWidth = Math.Max(1, indentWidth);
+		string indent = GetLeadingWhitespace(previousLine);
+		string trimmedPrevious = previousLine.TrimEnd();
+		string previousCode = trimmedPrevious.TrimStart();
+		if (previousCode.Length == 0)
+		{
+			return indent;
+		}
+
+		if (previousCode.StartsWith("*", StringComparison.Ordinal) &&
+			!previousCode.Contains("*/", StringComparison.Ordinal))
+		{
+			return indent + "* ";
+		}
+
+		if (previousCode.StartsWith("/*", StringComparison.Ordinal) &&
+			!previousCode.Contains("*/", StringComparison.Ordinal))
+		{
+			return indent + " * ";
+		}
+
+		if (previousCode.StartsWith("#", StringComparison.Ordinal))
+		{
+			return indent;
+		}
+
+		if (previousCode.EndsWith("{", StringComparison.Ordinal) || IsKeilSwitchLabel(previousCode))
+		{
+			return indent + new string(' ', indentWidth);
+		}
+
+		return indent;
+	}
+
+	private static bool IsKeilSwitchLabel(string trimmedLine)
+	{
+		if (trimmedLine.Equals("default:", StringComparison.Ordinal))
+		{
+			return true;
+		}
+
+		return Regex.IsMatch(trimmedLine, @"^case\b.*:\s*(?://.*)?$");
+	}
+
+	private static int CountKeilIndentRemoval(string lineText, int indentWidth)
+	{
+		indentWidth = Math.Max(1, indentWidth);
+		if (string.IsNullOrEmpty(lineText))
+		{
+			return 0;
+		}
+		if (lineText[0] == '\t')
+		{
+			return 1;
+		}
+
+		int spaces = 0;
+		while (spaces < lineText.Length && lineText[spaces] == ' ' && spaces < indentWidth)
+		{
+			spaces++;
+		}
+		return spaces;
+	}
+
+	private static bool IsWhitespaceOnly(string value)
+	{
+		for (int i = 0; i < value.Length; i++)
+		{
+			if (value[i] != ' ' && value[i] != '\t')
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private void TryInsertEditorText(Scintilla editor, int position, string text, int caretOffset)
+	{
+		editor.BeginUndoAction();
+		try
+		{
+			editor.InsertText(position, text);
+			editor.GotoPosition(position + caretOffset);
+		}
+		finally
+		{
+			editor.EndUndoAction();
+		}
+	}
+
+	private bool TryApplyKeilAutoPairAfterCharAdded(Scintilla editor, char typedChar)
+	{
+		int position = editor.CurrentPosition;
+		string text = editor.Text;
+		if (TryBuildKeilSkipOverTypedCloseEdit(text, position, typedChar, out int deleteStart, out int deleteLength, out int caretPosition))
+		{
+			editor.DeleteRange(deleteStart, deleteLength);
+			editor.GotoPosition(Math.Clamp(caretPosition, 0, editor.TextLength));
+			return true;
+		}
+
+		if (TryBuildKeilAutoPairInsertion(text, position, typedChar, out string insertion, out int pairCaretPosition))
+		{
+			editor.InsertText(position, insertion);
+			editor.GotoPosition(Math.Clamp(pairCaretPosition, 0, editor.TextLength));
+			return true;
+		}
+
+		return false;
+	}
+
+	private bool TryApplyKeilPairedBackspace(Scintilla editor)
+	{
+		if (editor.SelectionStart != editor.SelectionEnd)
+		{
+			return false;
+		}
+
+		if (!TryBuildKeilPairedBackspaceEdit(editor.Text, editor.CurrentPosition, out int deleteStart, out int deleteLength, out int caretPosition))
+		{
+			return false;
+		}
+
+		editor.DeleteRange(deleteStart, deleteLength);
+		editor.GotoPosition(Math.Clamp(caretPosition, 0, editor.TextLength));
+		return true;
+	}
+
+	private bool TryApplyKeilSelectionAutoPair(Scintilla editor, char typedChar)
+	{
+		if (!TryBuildKeilSelectionAutoPairEdit(
+			editor.Text,
+			editor.SelectionStart,
+			editor.SelectionEnd,
+			typedChar,
+			out int replaceStart,
+			out int replaceLength,
+			out string replacement,
+			out int selectionStart,
+			out int selectionEnd))
+		{
+			return false;
+		}
+
+		editor.BeginUndoAction();
+		try
+		{
+			editor.DeleteRange(replaceStart, replaceLength);
+			editor.InsertText(replaceStart, replacement);
+			editor.SetSelection(selectionEnd, selectionStart);
+		}
+		finally
+		{
+			editor.EndUndoAction();
+		}
+		return true;
+	}
+
+	private static bool TryBuildKeilSelectionAutoPairEdit(
+		string text,
+		int selectionStart,
+		int selectionEnd,
+		char typedChar,
+		out int replaceStart,
+		out int replaceLength,
+		out string replacement,
+		out int newSelectionStart,
+		out int newSelectionEnd)
+	{
+		replaceStart = 0;
+		replaceLength = 0;
+		replacement = "";
+		newSelectionStart = 0;
+		newSelectionEnd = 0;
+		if (string.IsNullOrEmpty(text) ||
+			!TryGetKeilAutoPairClose(typedChar, out char closeChar))
+		{
+			return false;
+		}
+
+		int start = Math.Min(selectionStart, selectionEnd);
+		int end = Math.Max(selectionStart, selectionEnd);
+		if (start < 0 ||
+			end > text.Length ||
+			start == end ||
+			!IsKeilCodeContextAtInsertion(text, start) ||
+			!IsKeilCodeContextAtInsertion(text, end))
+		{
+			return false;
+		}
+
+		string selectedText = text.Substring(start, end - start);
+		if (selectedText.Length == 0)
+		{
+			return false;
+		}
+
+		replaceStart = start;
+		replaceLength = selectedText.Length;
+		replacement = typedChar + selectedText + closeChar;
+		newSelectionStart = start + 1;
+		newSelectionEnd = newSelectionStart + selectedText.Length;
+		return true;
+	}
+
+	private static bool TryBuildKeilAutoPairInsertion(string text, int position, char typedChar, out string insertion, out int caretPosition)
+	{
+		insertion = "";
+		caretPosition = position;
+		if (string.IsNullOrEmpty(text) ||
+			position <= 0 ||
+			position > text.Length ||
+			text[position - 1] != typedChar ||
+			!TryGetKeilAutoPairClose(typedChar, out char closeChar) ||
+			!IsKeilAutoPairContext(text, position - 1, 1))
+		{
+			return false;
+		}
+
+		if (position < text.Length && !IsKeilAutoPairFriendlyNextChar(text[position]))
+		{
+			return false;
+		}
+
+		insertion = closeChar.ToString();
+		caretPosition = position;
+		return true;
+	}
+
+	private static bool TryBuildKeilSkipOverTypedCloseEdit(
+		string text,
+		int position,
+		char typedChar,
+		out int deleteStart,
+		out int deleteLength,
+		out int caretPosition)
+	{
+		deleteStart = 0;
+		deleteLength = 0;
+		caretPosition = position;
+		if (string.IsNullOrEmpty(text) ||
+			position <= 0 ||
+			position >= text.Length ||
+			text[position - 1] != typedChar ||
+			text[position] != typedChar ||
+			!IsKeilAutoPairCloseChar(typedChar))
+		{
+			return false;
+		}
+
+		deleteStart = position - 1;
+		deleteLength = 1;
+		caretPosition = position;
+		return true;
+	}
+
+	private static bool TryBuildKeilPairedBackspaceEdit(string text, int position, out int deleteStart, out int deleteLength, out int caretPosition)
+	{
+		deleteStart = 0;
+		deleteLength = 0;
+		caretPosition = position;
+		if (string.IsNullOrEmpty(text) ||
+			position <= 0 ||
+			position >= text.Length)
+		{
+			return false;
+		}
+
+		char open = text[position - 1];
+		char close = text[position];
+		if (!IsKeilAutoPair(open, close) || !IsKeilAutoPairContext(text, position - 1, 2))
+		{
+			return false;
+		}
+
+		deleteStart = position - 1;
+		deleteLength = 2;
+		caretPosition = position - 1;
+		return true;
+	}
+
+	private static bool TryGetKeilAutoPairClose(char open, out char close)
+	{
+		close = open switch
+		{
+			'(' => ')',
+			'[' => ']',
+			'{' => '}',
+			'"' => '"',
+			'\'' => '\'',
+			_ => '\0'
+		};
+		return close != '\0';
+	}
+
+	private static bool IsKeilAutoPair(char open, char close)
+	{
+		return TryGetKeilAutoPairClose(open, out char expectedClose) && expectedClose == close;
+	}
+
+	private static bool IsKeilAutoPairCloseChar(char value)
+	{
+		return value == ')' ||
+			value == ']' ||
+			value == '}' ||
+			value == '"' ||
+			value == '\'';
+	}
+
+	private static bool IsKeilAutoPairFriendlyNextChar(char value)
+	{
+		return char.IsWhiteSpace(value) ||
+			value == ')' ||
+			value == ']' ||
+			value == '}' ||
+			value == ';' ||
+			value == ',' ||
+			value == ':';
+	}
+
+	private static bool IsKeilAutoPairContext(string text, int position, int removeLength)
+	{
+		if (position < 0 || position > text.Length)
+		{
+			return false;
+		}
+
+		if (removeLength > 0 && position < text.Length)
+		{
+			removeLength = Math.Min(removeLength, text.Length - position);
+			text = text.Remove(position, removeLength);
+		}
+		return IsKeilCodeContextAtInsertion(text, position);
+	}
+
+	private static bool IsKeilCodeContextAtInsertion(string text, int position)
+	{
+		position = Math.Clamp(position, 0, text.Length);
+		const char marker = '\u0001';
+		string probe = text.Insert(position, marker.ToString());
+		string masked = MaskCommentsAndLiteralsPreserveLength(probe);
+		return position < masked.Length && masked[position] == marker;
+	}
+
+	private bool TryApplyKeilSmartPairEnter(Scintilla editor)
+	{
+		if (editor.SelectionStart != editor.SelectionEnd)
+		{
+			return false;
+		}
+
+		int position = editor.CurrentPosition;
+		string text = editor.Text;
+		string newLine = _sourceEditSession?.Buffer.NewLine ?? DetectKeilEditorNewLine(text);
+		if (!TryBuildKeilSmartPairEnterInsertion(text, position, GetKeilIndentWidth(editor), newLine, out string insertion, out int caretOffset))
+		{
+			return false;
+		}
+
+		TryInsertEditorText(editor, position, insertion, caretOffset);
+		return true;
+	}
+
+	private static bool TryBuildKeilSmartPairEnterInsertion(string text, int position, int indentWidth, string newLine, out string insertion, out int caretOffset)
+	{
+		insertion = "";
+		caretOffset = 0;
+		if (string.IsNullOrEmpty(text) || position <= 0 || position >= text.Length)
+		{
+			return false;
+		}
+
+		char open = text[position - 1];
+		char close = text[position];
+		if (!IsKeilMatchingPair(open, close))
+		{
+			return false;
+		}
+
+		string masked = MaskCommentsAndLiteralsPreserveLength(text);
+		if (position >= masked.Length || masked[position - 1] != open || masked[position] != close)
+		{
+			return false;
+		}
+
+		newLine = string.IsNullOrEmpty(newLine) ? Environment.NewLine : newLine;
+		indentWidth = Math.Max(1, indentWidth);
+		string lineText = GetKeilLineTextAtPosition(text, position);
+		string baseIndent = GetLeadingWhitespace(lineText);
+		string innerIndent = baseIndent + new string(' ', indentWidth);
+		insertion = newLine + innerIndent + newLine + baseIndent;
+		caretOffset = newLine.Length + innerIndent.Length;
+		return true;
+	}
+
+	private static bool IsKeilMatchingPair(char open, char close)
+	{
+		return (open == '(' && close == ')') ||
+			(open == '[' && close == ']') ||
+			(open == '{' && close == '}');
+	}
+
+	private static string GetKeilLineTextAtPosition(string text, int position)
+	{
+		if (string.IsNullOrEmpty(text))
+		{
+			return "";
+		}
+
+		position = Math.Clamp(position, 0, text.Length);
+		int lineStart = text.LastIndexOf('\n', Math.Max(0, position - 1));
+		lineStart = lineStart < 0 ? 0 : lineStart + 1;
+		if (lineStart < text.Length && text[lineStart] == '\r')
+		{
+			lineStart++;
+		}
+		int lineEnd = text.IndexOfAny(['\r', '\n'], position);
+		if (lineEnd < 0)
+		{
+			lineEnd = text.Length;
+		}
+		return text.Substring(lineStart, Math.Max(0, lineEnd - lineStart));
+	}
+
+	private static string DetectKeilEditorNewLine(string text)
+	{
+		if (!string.IsNullOrEmpty(text))
+		{
+			int lf = text.IndexOf('\n');
+			if (lf > 0 && text[lf - 1] == '\r')
+			{
+				return "\r\n";
+			}
+			if (lf >= 0)
+			{
+				return "\n";
+			}
+			if (text.IndexOf('\r') >= 0)
+			{
+				return "\r";
+			}
+		}
+		return Environment.NewLine;
+	}
+
+	private void ApplyKeilTabIndent(Scintilla editor, bool unindent)
+	{
+		int indentWidth = GetKeilIndentWidth(editor);
+		int selectionStart = Math.Min(editor.SelectionStart, editor.SelectionEnd);
+		int selectionEnd = Math.Max(editor.SelectionStart, editor.SelectionEnd);
+		if (selectionStart == selectionEnd)
+		{
+			if (unindent)
+			{
+				TryUnindentSingleEditorLine(editor, editor.LineFromPosition(selectionStart), indentWidth, moveCaret: true);
+			}
+			else
+			{
+				string spaces = new string(' ', indentWidth);
+				editor.InsertText(selectionStart, spaces);
+				editor.GotoPosition(selectionStart + spaces.Length);
+			}
+			return;
+		}
+
+		int startLine = editor.LineFromPosition(selectionStart);
+		int endLine = editor.LineFromPosition(selectionEnd);
+		if (endLine > startLine && selectionEnd == editor.Lines[endLine].Position)
+		{
+			endLine--;
+		}
+
+		editor.BeginUndoAction();
+		try
+		{
+			if (unindent)
+			{
+				var removals = new List<(int Position, int Length)>();
+				for (int lineIndex = endLine; lineIndex >= startLine; lineIndex--)
+				{
+					int removeLength = TryUnindentSingleEditorLine(editor, lineIndex, indentWidth, moveCaret: false);
+					if (removeLength > 0)
+					{
+						removals.Add((editor.Lines[lineIndex].Position, removeLength));
+					}
+				}
+
+				foreach ((int position, int length) in removals.OrderBy(item => item.Position))
+				{
+					selectionStart = AdjustPositionAfterIndentRemoval(selectionStart, position, length);
+					selectionEnd = AdjustPositionAfterIndentRemoval(selectionEnd, position, length);
+				}
+				editor.SetSelection(Math.Clamp(selectionEnd, 0, editor.TextLength), Math.Clamp(selectionStart, 0, editor.TextLength));
+			}
+			else
+			{
+				string spaces = new string(' ', indentWidth);
+				for (int lineIndex = endLine; lineIndex >= startLine; lineIndex--)
+				{
+					editor.InsertText(editor.Lines[lineIndex].Position, spaces);
+				}
+				int lineCount = endLine - startLine + 1;
+				editor.SetSelection(
+					Math.Clamp(selectionEnd + indentWidth * lineCount, 0, editor.TextLength),
+					Math.Clamp(selectionStart + indentWidth, 0, editor.TextLength));
+			}
+		}
+		finally
+		{
+			editor.EndUndoAction();
+		}
+	}
+
+	private static int AdjustPositionAfterIndentRemoval(int position, int removeStart, int removeLength)
+	{
+		if (removeLength <= 0 || position <= removeStart)
+		{
+			return position;
+		}
+		if (position <= removeStart + removeLength)
+		{
+			return removeStart;
+		}
+		return position - removeLength;
+	}
+
+	private int TryUnindentSingleEditorLine(Scintilla editor, int lineIndex, int indentWidth, bool moveCaret)
+	{
+		if (lineIndex < 0 || lineIndex >= editor.Lines.Count)
+		{
+			return 0;
+		}
+
+		ScintillaNET.Line line = editor.Lines[lineIndex];
+		string lineText = line.Text.TrimEnd('\r', '\n');
+		int removeLength = CountKeilIndentRemoval(lineText, indentWidth);
+		if (removeLength <= 0)
+		{
+			return 0;
+		}
+
+		int oldPosition = editor.CurrentPosition;
+		editor.DeleteRange(line.Position, removeLength);
+		if (moveCaret)
+		{
+			editor.GotoPosition(Math.Max(line.Position, oldPosition - removeLength));
+		}
+		return removeLength;
+	}
+
+	private bool TryApplyKeilBackspaceIndent(Scintilla editor)
+	{
+		if (editor.SelectionStart != editor.SelectionEnd)
+		{
+			return false;
+		}
+
+		int position = editor.CurrentPosition;
+		if (position <= 0)
+		{
+			return false;
+		}
+
+		int lineIndex = editor.LineFromPosition(position);
+		ScintillaNET.Line line = editor.Lines[lineIndex];
+		int column = position - line.Position;
+		if (column <= 0)
+		{
+			return false;
+		}
+
+		string lineText = line.Text.TrimEnd('\r', '\n');
+		if (column > lineText.Length)
+		{
+			return false;
+		}
+
+		string prefix = lineText[..column];
+		if (!IsWhitespaceOnly(prefix))
+		{
+			return false;
+		}
+
+		if (prefix[^1] == '\t')
+		{
+			editor.DeleteRange(position - 1, 1);
+			editor.GotoPosition(position - 1);
+			return true;
+		}
+
+		int indentWidth = GetKeilIndentWidth(editor);
+		int remainder = column % indentWidth;
+		int removeLength = remainder == 0 ? indentWidth : remainder;
+		removeLength = Math.Min(removeLength, column);
+		editor.DeleteRange(position - removeLength, removeLength);
+		editor.GotoPosition(position - removeLength);
+		return true;
+	}
+
+	private void TryApplyKeilClosingBraceOutdent(Scintilla editor)
+	{
+		int position = editor.CurrentPosition;
+		int lineIndex = editor.LineFromPosition(position);
+		if (lineIndex < 0 || lineIndex >= editor.Lines.Count)
+		{
+			return;
+		}
+
+		ScintillaNET.Line line = editor.Lines[lineIndex];
+		string lineText = line.Text.TrimEnd('\r', '\n');
+		int column = Math.Clamp(position - line.Position, 0, lineText.Length);
+		if (column <= 0)
+		{
+			return;
+		}
+
+		string beforeCaret = lineText[..column];
+		if (!Regex.IsMatch(beforeCaret, @"^[ \t]*\}$"))
+		{
+			return;
+		}
+
+		int removeLength = CountKeilIndentRemoval(lineText, GetKeilIndentWidth(editor));
+		if (removeLength <= 0)
+		{
+			return;
+		}
+
+		editor.DeleteRange(line.Position, removeLength);
+		editor.GotoPosition(Math.Max(line.Position, position - removeLength));
+	}
+
+	private bool TryApplyKeilSmartHome(Scintilla editor, bool extendSelection)
+	{
+		if (editor.TextLength == 0)
+		{
+			return false;
+		}
+
+		int position = Math.Clamp(editor.CurrentPosition, 0, editor.TextLength);
+		int lineIndex = editor.LineFromPosition(position);
+		if (lineIndex < 0 || lineIndex >= editor.Lines.Count)
+		{
+			return false;
+		}
+
+		ScintillaNET.Line line = editor.Lines[lineIndex];
+		string lineText = line.Text[..GetKeilLineContentLength(line.Text)];
+		int currentColumn = Math.Clamp(position - line.Position, 0, lineText.Length);
+		int targetColumn = GetKeilSmartHomeColumn(lineText, currentColumn);
+		int target = line.Position + targetColumn;
+		if (extendSelection)
+		{
+			editor.SetSelection(target, position);
+		}
+		else
+		{
+			editor.GotoPosition(target);
+		}
+		return true;
+	}
+
+	private static int GetKeilSmartHomeColumn(string lineText, int currentColumn)
+	{
+		int firstCodeColumn = GetKeilLineIndentLength(lineText);
+		if (firstCodeColumn >= lineText.Length)
+		{
+			return 0;
+		}
+
+		currentColumn = Math.Clamp(currentColumn, 0, lineText.Length);
+		return currentColumn == firstCodeColumn ? 0 : firstCodeColumn;
+	}
+
+	private void ToggleKeilLineComment(Scintilla editor)
+	{
+		if (editor.TextLength == 0 || !TryGetKeilSelectedLineRange(editor, out int startLine, out int endLine))
+		{
+			return;
+		}
+
+		bool uncomment = ShouldUncommentKeilLineRange(editor, startLine, endLine);
+		bool hadSelection = editor.SelectionStart != editor.SelectionEnd;
+		int originalLine = editor.LineFromPosition(editor.CurrentPosition);
+		int originalLineStart = editor.Lines[originalLine].Position;
+		string originalLineText = editor.Lines[originalLine].Text[..GetKeilLineContentLength(editor.Lines[originalLine].Text)];
+		int originalColumn = Math.Clamp(editor.CurrentPosition - originalLineStart, 0, originalLineText.Length);
+		int newCurrentColumn = originalColumn;
+		bool changed = false;
+
+		editor.BeginUndoAction();
+		try
+		{
+			for (int lineIndex = endLine; lineIndex >= startLine; lineIndex--)
+			{
+				ScintillaNET.Line line = editor.Lines[lineIndex];
+				int contentLength = GetKeilLineContentLength(line.Text);
+				string oldContent = line.Text[..contentLength];
+				string newContent = uncomment ? UncommentKeilLineText(oldContent) : CommentKeilLineText(oldContent);
+				if (newContent.Equals(oldContent, StringComparison.Ordinal))
+				{
+					continue;
+				}
+
+				changed = true;
+				editor.DeleteRange(line.Position, contentLength);
+				editor.InsertText(line.Position, newContent);
+				if (!hadSelection && lineIndex == originalLine)
+				{
+					newCurrentColumn = AdjustColumnAfterKeilLineCommentToggle(oldContent, newContent, originalColumn);
+				}
+			}
+		}
+		finally
+		{
+			editor.EndUndoAction();
+		}
+
+		if (!changed)
+		{
+			return;
+		}
+
+		if (hadSelection)
+		{
+			int newStart = editor.Lines[Math.Clamp(startLine, 0, editor.Lines.Count - 1)].Position;
+			int newEnd = endLine + 1 < editor.Lines.Count ? editor.Lines[endLine + 1].Position : editor.TextLength;
+			editor.SetSelection(newEnd, newStart);
+		}
+		else
+		{
+			int newLineStart = editor.Lines[Math.Clamp(originalLine, 0, editor.Lines.Count - 1)].Position;
+			int newLineLength = GetKeilLineContentLength(editor.Lines[Math.Clamp(originalLine, 0, editor.Lines.Count - 1)].Text);
+			editor.GotoPosition(newLineStart + Math.Clamp(newCurrentColumn, 0, newLineLength));
+		}
+	}
+
+	private static int AdjustColumnAfterKeilLineCommentToggle(string oldContent, string newContent, int originalColumn)
+	{
+		int oldIndent = GetKeilLineIndentLength(oldContent);
+		if (newContent.Length > oldContent.Length)
+		{
+			int added = newContent.Length - oldContent.Length;
+			return originalColumn >= oldIndent ? originalColumn + added : originalColumn;
+		}
+
+		int removed = oldContent.Length - newContent.Length;
+		if (removed <= 0 || originalColumn <= oldIndent)
+		{
+			return originalColumn;
+		}
+		return originalColumn <= oldIndent + removed ? oldIndent : originalColumn - removed;
+	}
+
+	private bool ToggleKeilBlockCommentSelection(Scintilla editor)
+	{
+		if (editor.ReadOnly ||
+			editor.SelectionStart == editor.SelectionEnd ||
+			!TryBuildKeilBlockCommentEdit(
+				editor.Text,
+				editor.SelectionStart,
+				editor.SelectionEnd,
+				_sourceEditSession?.Buffer.NewLine ?? DetectKeilEditorNewLine(editor.Text),
+				out int replaceStart,
+				out int replaceLength,
+				out string replacement,
+				out int newSelectionStart,
+				out int newSelectionEnd))
+		{
+			return false;
+		}
+
+		editor.BeginUndoAction();
+		try
+		{
+			editor.DeleteRange(replaceStart, replaceLength);
+			editor.InsertText(replaceStart, replacement);
+			editor.SetSelection(
+				Math.Clamp(newSelectionEnd, 0, editor.TextLength),
+				Math.Clamp(newSelectionStart, 0, editor.TextLength));
+		}
+		finally
+		{
+			editor.EndUndoAction();
+		}
+		return true;
+	}
+
+	private static bool TryBuildKeilBlockCommentEdit(
+		string text,
+		int selectionStart,
+		int selectionEnd,
+		string newLine,
+		out int replaceStart,
+		out int replaceLength,
+		out string replacement,
+		out int newSelectionStart,
+		out int newSelectionEnd)
+	{
+		replaceStart = 0;
+		replaceLength = 0;
+		replacement = "";
+		newSelectionStart = 0;
+		newSelectionEnd = 0;
+		if (string.IsNullOrEmpty(text))
+		{
+			return false;
+		}
+
+		replaceStart = Math.Clamp(Math.Min(selectionStart, selectionEnd), 0, text.Length);
+		int replaceEnd = Math.Clamp(Math.Max(selectionStart, selectionEnd), 0, text.Length);
+		replaceLength = replaceEnd - replaceStart;
+		if (replaceLength <= 0)
+		{
+			return false;
+		}
+
+		newLine = string.IsNullOrEmpty(newLine) ? Environment.NewLine : newLine;
+		string selected = text.Substring(replaceStart, replaceLength);
+		if (TryUnwrapKeilBlockComment(selected, out replacement))
+		{
+			newSelectionStart = replaceStart;
+			newSelectionEnd = replaceStart + replacement.Length;
+			return true;
+		}
+
+		if (selected.Contains("*/", StringComparison.Ordinal))
+		{
+			return false;
+		}
+
+		replacement = ContainsKeilLineBreak(selected)
+			? "/*" + newLine + selected + (EndsWithKeilLineBreak(selected) ? "" : newLine) + "*/"
+			: "/* " + selected + " */";
+		newSelectionStart = replaceStart;
+		newSelectionEnd = replaceStart + replacement.Length;
+		return true;
+	}
+
+	private static bool TryUnwrapKeilBlockComment(string selected, out string replacement)
+	{
+		replacement = "";
+		if (string.IsNullOrEmpty(selected))
+		{
+			return false;
+		}
+
+		int prefixLength = 0;
+		while (prefixLength < selected.Length && char.IsWhiteSpace(selected[prefixLength]))
+		{
+			prefixLength++;
+		}
+
+		int suffixStart = selected.Length;
+		while (suffixStart > prefixLength && char.IsWhiteSpace(selected[suffixStart - 1]))
+		{
+			suffixStart--;
+		}
+
+		if (suffixStart - prefixLength < 4 ||
+			!selected.AsSpan(prefixLength, 2).SequenceEqual("/*") ||
+			!selected.AsSpan(suffixStart - 2, 2).SequenceEqual("*/"))
+		{
+			return false;
+		}
+
+		string prefix = selected[..prefixLength];
+		string suffix = selected[suffixStart..];
+		string inner = selected.Substring(prefixLength + 2, suffixStart - prefixLength - 4);
+		inner = TrimOneKeilBlockCommentPadding(inner);
+		replacement = prefix + inner + suffix;
+		return true;
+	}
+
+	private static string TrimOneKeilBlockCommentPadding(string value)
+	{
+		if (value.StartsWith("\r\n", StringComparison.Ordinal))
+		{
+			value = value[2..];
+		}
+		else if (value.StartsWith("\n", StringComparison.Ordinal) || value.StartsWith("\r", StringComparison.Ordinal))
+		{
+			value = value[1..];
+		}
+		else if (value.StartsWith(" ", StringComparison.Ordinal))
+		{
+			value = value[1..];
+		}
+
+		if (value.EndsWith("\r\n", StringComparison.Ordinal))
+		{
+			value = value[..^2];
+		}
+		else if (value.EndsWith("\n", StringComparison.Ordinal) || value.EndsWith("\r", StringComparison.Ordinal))
+		{
+			value = value[..^1];
+		}
+		else if (value.EndsWith(" ", StringComparison.Ordinal))
+		{
+			value = value[..^1];
+		}
+
+		return value;
+	}
+
+	private static bool ContainsKeilLineBreak(string text)
+	{
+		return text.IndexOf('\r') >= 0 || text.IndexOf('\n') >= 0;
+	}
+
+	private static bool ShouldUncommentKeilLineRange(Scintilla editor, int startLine, int endLine)
+	{
+		bool hasNonBlank = false;
+		for (int lineIndex = startLine; lineIndex <= endLine && lineIndex < editor.Lines.Count; lineIndex++)
+		{
+			string content = editor.Lines[lineIndex].Text[..GetKeilLineContentLength(editor.Lines[lineIndex].Text)];
+			if (string.IsNullOrWhiteSpace(content))
+			{
+				continue;
+			}
+
+			hasNonBlank = true;
+			if (!IsKeilLineCommented(content))
+			{
+				return false;
+			}
+		}
+
+		return hasNonBlank;
+	}
+
+	private static string CommentKeilLineText(string lineText)
+	{
+		if (string.IsNullOrWhiteSpace(lineText))
+		{
+			return lineText;
+		}
+
+		int indent = GetKeilLineIndentLength(lineText);
+		return lineText.Insert(indent, "// ");
+	}
+
+	private static string UncommentKeilLineText(string lineText)
+	{
+		if (!IsKeilLineCommented(lineText))
+		{
+			return lineText;
+		}
+
+		int indent = GetKeilLineIndentLength(lineText);
+		int removeLength = indent + 2 < lineText.Length && lineText[indent + 2] == ' ' ? 3 : 2;
+		return lineText.Remove(indent, removeLength);
+	}
+
+	private static bool IsKeilLineCommented(string lineText)
+	{
+		int indent = GetKeilLineIndentLength(lineText);
+		return indent + 1 < lineText.Length && lineText[indent] == '/' && lineText[indent + 1] == '/';
+	}
+
+	private static int GetKeilLineIndentLength(string lineText)
+	{
+		int index = 0;
+		while (index < lineText.Length && (lineText[index] == ' ' || lineText[index] == '\t'))
+		{
+			index++;
+		}
+		return index;
+	}
+
+	private static int GetKeilLineContentLength(string lineText)
+	{
+		if (lineText.EndsWith("\r\n", StringComparison.Ordinal))
+		{
+			return lineText.Length - 2;
+		}
+		if (lineText.EndsWith("\n", StringComparison.Ordinal) || lineText.EndsWith("\r", StringComparison.Ordinal))
+		{
+			return lineText.Length - 1;
+		}
+		return lineText.Length;
+	}
+
+	private bool TryGetKeilSelectedLineRange(Scintilla editor, out int startLine, out int endLine)
+	{
+		startLine = 0;
+		endLine = 0;
+		if (editor.Lines.Count == 0)
+		{
+			return false;
+		}
+
+		int selectionStart = Math.Min(editor.SelectionStart, editor.SelectionEnd);
+		int selectionEnd = Math.Max(editor.SelectionStart, editor.SelectionEnd);
+		startLine = Math.Clamp(editor.LineFromPosition(selectionStart), 0, editor.Lines.Count - 1);
+		endLine = Math.Clamp(editor.LineFromPosition(selectionEnd), 0, editor.Lines.Count - 1);
+		if (endLine > startLine && selectionEnd == editor.Lines[endLine].Position)
+		{
+			endLine--;
+		}
+
+		return true;
+	}
+
+	private void DuplicateKeilCurrentLines(Scintilla editor)
+	{
+		if (editor.TextLength == 0 ||
+			!TryBuildKeilDuplicateLinesEdit(
+				editor.Text,
+				editor.SelectionStart,
+				editor.SelectionEnd,
+				_sourceEditSession?.Buffer.NewLine ?? DetectKeilEditorNewLine(editor.Text),
+				out int insertPosition,
+				out string insertion,
+				out int newSelectionStart,
+				out int newSelectionEnd))
+		{
+			return;
+		}
+
+		editor.BeginUndoAction();
+		try
+		{
+			editor.InsertText(insertPosition, insertion);
+			editor.SetSelection(
+				Math.Clamp(newSelectionEnd, 0, editor.TextLength),
+				Math.Clamp(newSelectionStart, 0, editor.TextLength));
+		}
+		finally
+		{
+			editor.EndUndoAction();
+		}
+	}
+
+	private static bool TryBuildKeilDuplicateLinesEdit(
+		string text,
+		int selectionStart,
+		int selectionEnd,
+		string newLine,
+		out int insertPosition,
+		out string insertion,
+		out int newSelectionStart,
+		out int newSelectionEnd)
+	{
+		insertPosition = 0;
+		insertion = "";
+		newSelectionStart = 0;
+		newSelectionEnd = 0;
+		if (string.IsNullOrEmpty(text))
+		{
+			return false;
+		}
+
+		newLine = string.IsNullOrEmpty(newLine) ? Environment.NewLine : newLine;
+		int start = Math.Clamp(Math.Min(selectionStart, selectionEnd), 0, text.Length);
+		int end = Math.Clamp(Math.Max(selectionStart, selectionEnd), 0, text.Length);
+		int lineStart = GetKeilTextLineStart(text, start);
+		int lineEnd = GetKeilTextSelectedLineEnd(text, start, end);
+		if (lineEnd <= lineStart)
+		{
+			return false;
+		}
+
+		string block = text.Substring(lineStart, lineEnd - lineStart);
+		bool blockEndsWithLineBreak = EndsWithKeilLineBreak(block);
+		insertPosition = lineEnd;
+		if (blockEndsWithLineBreak)
+		{
+			insertion = block;
+			newSelectionStart = insertPosition;
+			newSelectionEnd = insertPosition + block.Length;
+		}
+		else
+		{
+			insertion = newLine + block;
+			newSelectionStart = insertPosition + newLine.Length;
+			newSelectionEnd = newSelectionStart + block.Length;
+		}
+		return insertion.Length > 0;
+	}
+
+	private static int GetKeilTextLineStart(string text, int position)
+	{
+		position = Math.Clamp(position, 0, text.Length);
+		int lineStart = text.LastIndexOf('\n', Math.Max(0, position - 1));
+		return lineStart < 0 ? 0 : lineStart + 1;
+	}
+
+	private static int GetKeilTextSelectedLineEnd(string text, int selectionStart, int selectionEnd)
+	{
+		selectionStart = Math.Clamp(selectionStart, 0, text.Length);
+		selectionEnd = Math.Clamp(selectionEnd, 0, text.Length);
+		if (selectionEnd > selectionStart &&
+			selectionEnd <= text.Length &&
+			IsKeilAtLineStart(text, selectionEnd))
+		{
+			return selectionEnd;
+		}
+
+		int lineEnd = text.IndexOf('\n', selectionEnd);
+		return lineEnd < 0 ? text.Length : lineEnd + 1;
+	}
+
+	private static bool IsKeilAtLineStart(string text, int position)
+	{
+		if (position <= 0)
+		{
+			return true;
+		}
+		if (position > text.Length)
+		{
+			return false;
+		}
+		return text[position - 1] == '\n';
+	}
+
+	private static bool EndsWithKeilLineBreak(string text)
+	{
+		return text.EndsWith("\n", StringComparison.Ordinal) ||
+			text.EndsWith("\r", StringComparison.Ordinal);
+	}
+
+	private void SmartIndentKeilCurrentLines(Scintilla editor)
+	{
+		if (editor.TextLength == 0)
+		{
+			return;
+		}
+
+		bool hadSelection = editor.SelectionStart != editor.SelectionEnd;
+		int originalLine = editor.LineFromPosition(editor.CurrentPosition);
+		int originalLineStart = editor.Lines[originalLine].Position;
+		string originalLineText = editor.Lines[originalLine].Text[..GetKeilLineContentLength(editor.Lines[originalLine].Text)];
+		int originalIndent = GetKeilLineIndentLength(originalLineText);
+		int originalColumn = Math.Clamp(editor.CurrentPosition - originalLineStart, 0, originalLineText.Length);
+		if (!TryBuildKeilSmartIndentEdit(
+			editor.Text,
+			editor.SelectionStart,
+			editor.SelectionEnd,
+			GetKeilIndentWidth(editor),
+			out int replaceStart,
+			out int replaceLength,
+			out string replacement,
+			out int selectionStart,
+			out int selectionEnd))
+		{
+			return;
+		}
+
+		editor.BeginUndoAction();
+		try
+		{
+			editor.DeleteRange(replaceStart, replaceLength);
+			editor.InsertText(replaceStart, replacement);
+		}
+		finally
+		{
+			editor.EndUndoAction();
+		}
+
+		if (hadSelection)
+		{
+			editor.SetSelection(
+				Math.Clamp(selectionEnd, 0, editor.TextLength),
+				Math.Clamp(selectionStart, 0, editor.TextLength));
+			return;
+		}
+
+		originalLine = Math.Clamp(originalLine, 0, Math.Max(0, editor.Lines.Count - 1));
+		int newLineStart = editor.Lines[originalLine].Position;
+		string newLineText = editor.Lines[originalLine].Text[..GetKeilLineContentLength(editor.Lines[originalLine].Text)];
+		int newIndent = GetKeilLineIndentLength(newLineText);
+		int newColumn = originalColumn <= originalIndent
+			? newIndent
+			: originalColumn - originalIndent + newIndent;
+		editor.GotoPosition(newLineStart + Math.Clamp(newColumn, 0, newLineText.Length));
+	}
+
+	private static bool TryBuildKeilSmartIndentEdit(
+		string text,
+		int selectionStart,
+		int selectionEnd,
+		int indentWidth,
+		out int replaceStart,
+		out int replaceLength,
+		out string replacement,
+		out int newSelectionStart,
+		out int newSelectionEnd)
+	{
+		replaceStart = 0;
+		replaceLength = 0;
+		replacement = "";
+		newSelectionStart = 0;
+		newSelectionEnd = 0;
+		if (string.IsNullOrEmpty(text))
+		{
+			return false;
+		}
+
+		indentWidth = Math.Max(1, indentWidth);
+		List<KeilTextLine> lines = SplitKeilTextLines(text);
+		if (lines.Count == 0)
+		{
+			return false;
+		}
+
+		int start = Math.Clamp(Math.Min(selectionStart, selectionEnd), 0, text.Length);
+		int end = Math.Clamp(Math.Max(selectionStart, selectionEnd), 0, text.Length);
+		int startLine = GetKeilTextLineIndex(lines, start);
+		int endLine = GetKeilTextLineIndex(lines, end);
+		if (endLine > startLine && end == lines[endLine].Start)
+		{
+			endLine--;
+		}
+		startLine = Math.Clamp(startLine, 0, lines.Count - 1);
+		endLine = Math.Clamp(endLine, startLine, lines.Count - 1);
+
+		string masked = MaskCommentsAndLiteralsPreserveLength(text);
+		int depth = 0;
+		for (int i = 0; i < startLine; i++)
+		{
+			depth = Math.Max(0, depth + GetKeilBraceDepthDelta(masked, lines[i]));
+		}
+
+		var builder = new StringBuilder();
+		int runningDepth = depth;
+		for (int i = startLine; i <= endLine; i++)
+		{
+			KeilTextLine line = lines[i];
+			string content = line.Content;
+			string trimmed = content.TrimStart(' ', '\t');
+			string maskedContent = masked.Substring(line.Start, line.Content.Length);
+			string maskedTrimmed = maskedContent.TrimStart(' ', '\t');
+			string newContent;
+			if (trimmed.Length == 0)
+			{
+				newContent = "";
+			}
+			else if (maskedTrimmed.StartsWith("#", StringComparison.Ordinal))
+			{
+				newContent = trimmed;
+			}
+			else
+			{
+				int lineDepth = maskedTrimmed.StartsWith("}", StringComparison.Ordinal)
+					? Math.Max(0, runningDepth - 1)
+					: runningDepth;
+				newContent = new string(' ', lineDepth * indentWidth) + trimmed;
+			}
+
+			builder.Append(newContent);
+			builder.Append(line.Ending);
+			if (!maskedTrimmed.StartsWith("#", StringComparison.Ordinal))
+			{
+				runningDepth = Math.Max(0, runningDepth + GetKeilBraceDepthDelta(masked, line));
+			}
+		}
+
+		replaceStart = lines[startLine].Start;
+		replaceLength = lines[endLine].End - replaceStart;
+		replacement = builder.ToString();
+		if (replacement.Equals(text.Substring(replaceStart, replaceLength), StringComparison.Ordinal))
+		{
+			return false;
+		}
+
+		newSelectionStart = replaceStart;
+		newSelectionEnd = replaceStart + replacement.Length;
+		return true;
+	}
+
+	private static List<KeilTextLine> SplitKeilTextLines(string text)
+	{
+		var lines = new List<KeilTextLine>();
+		if (string.IsNullOrEmpty(text))
+		{
+			return lines;
+		}
+
+		int index = 0;
+		while (index < text.Length)
+		{
+			int start = index;
+			while (index < text.Length && text[index] != '\r' && text[index] != '\n')
+			{
+				index++;
+			}
+			int contentEnd = index;
+			string ending = "";
+			if (index < text.Length)
+			{
+				if (text[index] == '\r' && index + 1 < text.Length && text[index + 1] == '\n')
+				{
+					ending = "\r\n";
+					index += 2;
+				}
+				else
+				{
+					ending = text[index].ToString();
+					index++;
+				}
+			}
+			lines.Add(new KeilTextLine(text.Substring(start, contentEnd - start), ending, start, index));
+		}
+		return lines;
+	}
+
+	private static int GetKeilTextLineIndex(IReadOnlyList<KeilTextLine> lines, int position)
+	{
+		if (lines.Count == 0)
+		{
+			return 0;
+		}
+
+		position = Math.Clamp(position, 0, lines[^1].End);
+		for (int i = 0; i < lines.Count; i++)
+		{
+			if (position < lines[i].End || i == lines.Count - 1)
+			{
+				return i;
+			}
+		}
+		return lines.Count - 1;
+	}
+
+	private static int GetKeilBraceDepthDelta(string maskedText, KeilTextLine line)
+	{
+		int delta = 0;
+		int end = Math.Min(maskedText.Length, line.Start + line.Content.Length);
+		for (int i = line.Start; i < end; i++)
+		{
+			if (maskedText[i] == '{')
+			{
+				delta++;
+			}
+			else if (maskedText[i] == '}')
+			{
+				delta--;
+			}
+		}
+		return delta;
+	}
+
+	private static string BuildKeilPasteText(
+		string clipboardText,
+		string editorText,
+		int selectionStart,
+		int selectionEnd,
+		int indentWidth,
+		string newLine)
+	{
+		if (string.IsNullOrEmpty(clipboardText))
+		{
+			return "";
+		}
+
+		indentWidth = Math.Max(1, indentWidth);
+		newLine = string.IsNullOrEmpty(newLine) ? Environment.NewLine : newLine;
+		string indentUnit = new string(' ', indentWidth);
+		string normalized = NormalizeKeilPasteNewLines(clipboardText, newLine).Replace("\t", indentUnit, StringComparison.Ordinal);
+		if (!normalized.Contains(newLine, StringComparison.Ordinal))
+		{
+			return normalized;
+		}
+
+		int start = Math.Clamp(Math.Min(selectionStart, selectionEnd), 0, editorText.Length);
+		int lineStart = GetKeilTextLineStart(editorText, start);
+		string currentLinePrefix = editorText.Substring(lineStart, start - lineStart).Replace("\t", indentUnit, StringComparison.Ordinal);
+		if (!IsWhitespaceOnly(currentLinePrefix))
+		{
+			return normalized;
+		}
+
+		string[] lines = normalized.Split(new[] { newLine }, StringSplitOptions.None);
+		int commonIndent = GetKeilCommonLeadingSpaces(lines);
+		for (int i = 0; i < lines.Length; i++)
+		{
+			if (commonIndent > 0 && lines[i].Length >= commonIndent)
+			{
+				lines[i] = lines[i][commonIndent..];
+			}
+			if (i > 0 && lines[i].Length > 0)
+			{
+				lines[i] = currentLinePrefix + lines[i];
+			}
+		}
+
+		return string.Join(newLine, lines);
+	}
+
+	private static string NormalizeKeilPasteNewLines(string text, string newLine)
+	{
+		return text
+			.Replace("\r\n", "\n", StringComparison.Ordinal)
+			.Replace("\r", "\n", StringComparison.Ordinal)
+			.Replace("\n", newLine, StringComparison.Ordinal);
+	}
+
+	private static int GetKeilCommonLeadingSpaces(IReadOnlyList<string> lines)
+	{
+		int common = int.MaxValue;
+		for (int i = 0; i < lines.Count; i++)
+		{
+			string line = lines[i];
+			if (line.Trim().Length == 0)
+			{
+				continue;
+			}
+
+			int indent = 0;
+			while (indent < line.Length && line[indent] == ' ')
+			{
+				indent++;
+			}
+			common = Math.Min(common, indent);
+		}
+
+		return common == int.MaxValue ? 0 : common;
+	}
+
+	private void DeleteKeilCurrentLines(Scintilla editor)
+	{
+		if (editor.TextLength == 0 || !TryGetKeilSelectedLineRange(editor, out int startLine, out int endLine))
+		{
+			return;
+		}
+
+		startLine = Math.Clamp(startLine, 0, editor.Lines.Count - 1);
+		endLine = Math.Clamp(endLine, startLine, editor.Lines.Count - 1);
+		int start = editor.Lines[startLine].Position;
+		int end = endLine + 1 < editor.Lines.Count ? editor.Lines[endLine + 1].Position : editor.TextLength;
+		if (end <= start)
+		{
+			return;
+		}
+
+		editor.BeginUndoAction();
+		try
+		{
+			editor.DeleteRange(start, end - start);
+		}
+		finally
+		{
+			editor.EndUndoAction();
+		}
+
+		editor.GotoPosition(Math.Clamp(start, 0, editor.TextLength));
+	}
+
 	private void CodeEditorUpdateUI(object? sender, ScintillaNET.UpdateUIEventArgs e)
 	{
 		if ((e.Change & ScintillaNET.UpdateChange.Selection) != 0)
 		{
 			UpdateScintillaScopeHighlight();
+			UpdateScintillaIdentifierReferenceHighlight();
 			UpdateProgramTreeFocusFromScintillaCaretThrottled();
 		}
 
@@ -12919,6 +14985,89 @@ public sealed partial class MainForm : Form
 			_codeEditor.IndicatorClearRange(close, 1);
 		}
 		_lastScintillaScopePair = null;
+	}
+
+	private void UpdateScintillaIdentifierReferenceHighlight()
+	{
+		if (_codeEditor == null || _codeEditor.IsDisposed)
+		{
+			return;
+		}
+
+		_codeEditor.IndicatorCurrent = ScintillaIndicatorIdentifierReference;
+		_codeEditor.IndicatorClearRange(0, _codeEditor.TextLength);
+		if (_codeEditor.TextLength == 0 ||
+			!TryGetKeilIdentifierAtCaret(_codeEditor.Text, _codeEditor.CurrentPosition, out int start, out int length, out string identifier))
+		{
+			return;
+		}
+
+		foreach ((int matchStart, int matchLength) in BuildKeilIdentifierReferenceSpans(_codeEditor.Text, start, length, identifier))
+		{
+			_codeEditor.IndicatorFillRange(matchStart, matchLength);
+		}
+	}
+
+	private static bool TryGetKeilIdentifierAtCaret(string text, int caret, out int start, out int length, out string identifier)
+	{
+		start = 0;
+		length = 0;
+		identifier = "";
+		if (string.IsNullOrEmpty(text))
+		{
+			return false;
+		}
+
+		caret = Math.Clamp(caret, 0, text.Length);
+		if (caret < text.Length && TryGetIdentifierAt(text, caret, out start, out length, out identifier))
+		{
+			return !IsCKeywordToken(identifier);
+		}
+
+		if (caret > 0 && TryGetIdentifierAt(text, caret - 1, out start, out length, out identifier))
+		{
+			return !IsCKeywordToken(identifier);
+		}
+
+		return false;
+	}
+
+	private static List<(int Start, int Length)> BuildKeilIdentifierReferenceSpans(string text, int tokenStart, int tokenLength, string identifier)
+	{
+		var spans = new List<(int Start, int Length)>();
+		if (string.IsNullOrEmpty(text) ||
+			string.IsNullOrWhiteSpace(identifier) ||
+			tokenStart < 0 ||
+			tokenLength <= 0 ||
+			tokenStart + tokenLength > text.Length ||
+			IsCKeywordToken(identifier))
+		{
+			return spans;
+		}
+
+		string masked = MaskCommentsAndLiteralsPreserveLength(text);
+		if (tokenStart + tokenLength > masked.Length ||
+			!masked.Substring(tokenStart, tokenLength).Equals(identifier, StringComparison.Ordinal))
+		{
+			return spans;
+		}
+
+		int index = 0;
+		while (index < masked.Length)
+		{
+			int match = masked.IndexOf(identifier, index, StringComparison.Ordinal);
+			if (match < 0)
+			{
+				break;
+			}
+			if (IsWholeIdentifierMatch(masked, match, identifier.Length))
+			{
+				spans.Add((match, identifier.Length));
+			}
+			index = match + identifier.Length;
+		}
+
+		return spans;
 	}
 
 	private void CollapseProtectedScintillaSelection(string context)
@@ -13862,12 +16011,7 @@ public sealed partial class MainForm : Form
 			return null;
 		}
 
-		List<(int Open, int Close)> pairs = BuildScopePairs(text)
-			.Where(pair =>
-				pair.Open >= 0 &&
-				pair.Open < text.Length &&
-				text[pair.Open] == '{')
-			.ToList();
+		List<(int Open, int Close)> pairs = BuildScopePairs(text);
 		if (pairs.Count == 0)
 		{
 			return null;
@@ -13879,6 +16023,67 @@ public sealed partial class MainForm : Form
 			.OrderBy(p => p.Close - p.Open)
 			.Cast<(int Open, int Close)?>()
 			.FirstOrDefault();
+	}
+
+	private static bool TryGetKeilMatchingBraceJumpPosition(string text, int caret, out int source, out int target)
+	{
+		source = -1;
+		target = -1;
+		if (!TryFindKeilBraceAtCaret(text, caret, out source))
+		{
+			return false;
+		}
+
+		foreach ((int open, int close) in BuildScopePairs(text))
+		{
+			if (open == source)
+			{
+				target = close;
+				return true;
+			}
+			if (close == source)
+			{
+				target = open;
+				return true;
+			}
+		}
+
+		source = -1;
+		target = -1;
+		return false;
+	}
+
+	private static bool TryFindKeilBraceAtCaret(string text, int caret, out int braceIndex)
+	{
+		braceIndex = -1;
+		if (string.IsNullOrEmpty(text))
+		{
+			return false;
+		}
+
+		int position = Math.Clamp(caret, 0, text.Length);
+		if (position < text.Length && IsKeilBraceChar(text[position]))
+		{
+			braceIndex = position;
+			return true;
+		}
+		if (position > 0 && IsKeilBraceChar(text[position - 1]))
+		{
+			braceIndex = position - 1;
+			return true;
+		}
+
+		return false;
+	}
+
+	private static bool IsKeilBraceChar(char value)
+	{
+		return value == '(' ||
+			value == ')' ||
+			value == '[' ||
+			value == ']' ||
+			value == '{' ||
+			value == '}';
 	}
 
 	private static List<(int Open, int Close)> BuildScopePairs(string text)
@@ -13946,13 +16151,18 @@ public sealed partial class MainForm : Form
 				inChar = true;
 				continue;
 			}
-			if (c == '(' || c == '{')
+			if (c == '(' || c == '[' || c == '{')
 			{
 				stack.Push((c, i));
 			}
-			else if (c == ')' || c == '}')
+			else if (c == ')' || c == ']' || c == '}')
 			{
-				char open = c == ')' ? '(' : '{';
+				char open = c switch
+				{
+					')' => '(',
+					']' => '[',
+					_ => '{'
+				};
 				if (stack.Count > 0 && stack.Peek().Ch == open)
 				{
 					var item = stack.Pop();
@@ -14065,26 +16275,9 @@ public sealed partial class MainForm : Form
 			return;
 		}
 		string keyword = _programSearchBox?.Text.Trim() ?? "";
-		_activeProgramSearchKeyword = keyword;
-		_activeProgramSearchLine = result.LineNumber;
-		if (!string.IsNullOrWhiteSpace(result.FunctionName) &&
-			TryLoadFunctionSourceFromFile(result.FilePath, result.FunctionName, out FunctionSourceView? functionSource) &&
-			functionSource != null)
+		if (CanNavigateKeilSearchResult(result))
 		{
-			ShowFunctionSource(functionSource, pushCurrent: _currentFunctionSource != null, clearForward: true);
-			SelectApproximateLineInFunction(result.LineNumber);
-			return;
-		}
-		if (TryLoadNearestFunctionSource(result.FilePath, result.LineNumber, out FunctionSourceView? nearest) && nearest != null)
-		{
-			ShowFunctionSource(nearest, pushCurrent: _currentFunctionSource != null, clearForward: true);
-			SelectApproximateLineInFunction(result.LineNumber);
-			return;
-		}
-		if (TryLoadSourceSnippet(result.FilePath, result.LineNumber, out FunctionSourceView? snippet) && snippet != null)
-		{
-			ShowFunctionSource(snippet, pushCurrent: _currentFunctionSource != null, clearForward: true);
-			SelectApproximateLineInFunction(result.LineNumber);
+			NavigateToProgramSearchResult(result, keyword, pushCurrent: _currentFunctionSource != null);
 		}
 	}
 
@@ -17773,7 +19966,9 @@ public sealed partial class MainForm : Form
 			ApplyScintillaSemanticStyles(BuildEditorRenderLinesFromScintilla());
 			if (includeValues)
 			{
+				HideCodeValueOverlay();
 				ApplyScintillaRuntimeHighlights(renderedLines, renderSource);
+				ApplyScintillaRuntimeValueAnnotations(renderedLines, force: true);
 			}
 			UpdateSourceEditStatus("未保存", Color.FromArgb(245, 158, 11));
 			return;
@@ -17817,8 +20012,9 @@ public sealed partial class MainForm : Form
 		ApplyScintillaSemanticStyles(renderedLines);
 		if (includeValues)
 		{
-			ApplyScintillaRuntimeHighlights(renderedLines, renderSource);
 			HideCodeValueOverlay();
+			ApplyScintillaRuntimeHighlights(renderedLines, renderSource);
+			ApplyScintillaRuntimeValueAnnotations(renderedLines, force: true);
 		}
 		else if (_codeValueOverlay != null)
 		{
@@ -17965,14 +20161,8 @@ public sealed partial class MainForm : Form
 		_codeEditor.MarkerDeleteAll(ScintillaMarkerTrueLine);
 		_codeEditor.MarkerDeleteAll(ScintillaMarkerSearchLine);
 		_codeEditor.MarkerDeleteAll(ScintillaMarkerHoverLine);
-		if (_lastScintillaHoverLine >= 0 && _lastScintillaHoverLine < _codeEditor.Lines.Count)
-		{
-			_codeEditor.Lines[_lastScintillaHoverLine].MarkerAdd(ScintillaMarkerHoverLine);
-		}
-		else
-		{
-			_lastScintillaHoverLine = -1;
-		}
+		_codeEditor.MarkerDeleteAll(ScintillaMarkerBuildDiagnosticLine);
+		ApplyLockedBuildDiagnosticLineMarker();
 		_codeEditor.IndicatorCurrent = ScintillaIndicatorFocus;
 		_codeEditor.IndicatorClearRange(0, _codeEditor.TextLength);
 		_codeEditor.IndicatorCurrent = ScintillaIndicatorSearch;
@@ -17995,6 +20185,8 @@ public sealed partial class MainForm : Form
 		_codeEditor.IndicatorClearRange(0, _codeEditor.TextLength);
 		_codeEditor.IndicatorCurrent = ScintillaIndicatorTrueCondition;
 		_codeEditor.IndicatorClearRange(0, _codeEditor.TextLength);
+		_codeEditor.IndicatorCurrent = ScintillaIndicatorIdentifierReference;
+		_codeEditor.IndicatorClearRange(0, _codeEditor.TextLength);
 
 		for (int i = 0; i < renderedLines.Count && i < _codeEditor.Lines.Count; i++)
 		{
@@ -18012,6 +20204,38 @@ public sealed partial class MainForm : Form
 			HighlightScintillaTokenInLine(i, _focusedVariableName, ScintillaIndicatorFocus);
 			HighlightScintillaTokenInLine(i, _activeProgramSearchKeyword, ScintillaIndicatorSearch);
 		}
+		UpdateScintillaIdentifierReferenceHighlight();
+	}
+
+	private void ApplyScintillaRuntimeValueAnnotations(IReadOnlyList<CodeLineRender> renderedLines, bool force = false)
+	{
+		if (_codeEditor == null || _codeEditor.IsDisposed || _codeEditor.TextLength == 0)
+		{
+			return;
+		}
+
+		var rows = new List<ScintillaValueAnnotationRow>();
+		for (int lineIndex = 0; lineIndex < renderedLines.Count && lineIndex < _codeEditor.Lines.Count; lineIndex++)
+		{
+			string text = BuildScintillaValueAnnotationText(renderedLines[lineIndex].Values);
+			if (text.Length > 0)
+			{
+				rows.Add(new ScintillaValueAnnotationRow(lineIndex, text));
+			}
+		}
+
+		ApplyScintillaValueAnnotations(rows, force);
+	}
+
+	private static string BuildScintillaValueAnnotationText(IReadOnlyList<string> values)
+	{
+		if (values.Count == 0)
+		{
+			return "";
+		}
+
+		string text = string.Join("    ", values.Take(6).Select(NormalizeInlineRenderedValue).Where(x => x.Length > 0));
+		return text;
 	}
 
 	private void ApplyScintillaInlineValueSpans(int lineIndex, CodeLineRender renderedLine)
@@ -19146,6 +21370,10 @@ public sealed partial class MainForm : Form
 		{
 			_buildDiagnosticsList.Items.Add(diagnostic);
 		}
+		if (diagnostics.Count == 0)
+		{
+			ClearLockedBuildDiagnosticSourceLine();
+		}
 		if (diagnostics.Count == 0 && !string.IsNullOrWhiteSpace(logPath))
 		{
 			_buildDiagnosticsList.Items.Add("Keil 日志：" + logPath);
@@ -19164,42 +21392,118 @@ public sealed partial class MainForm : Form
 			File.Exists(diagnostic.FilePath))
 		{
 			int line = Math.Max(1, diagnostic.Line);
+			string filePath = diagnostic.FilePath;
 			NavigateToSourceLocation(diagnostic.FilePath, line, pushCurrent: _currentFunctionSource != null);
-			LockBuildDiagnosticSourceLine(line);
-			BeginInvoke(new Action(() => LockBuildDiagnosticSourceLine(line)));
+			LockBuildDiagnosticSourceLine(filePath, line);
+			BeginInvoke(new Action(() => LockBuildDiagnosticSourceLine(filePath, line)));
 		}
 	}
 
-	private void LockBuildDiagnosticSourceLine(int absoluteLine)
+	private void LockBuildDiagnosticSourceLine(string filePath, int absoluteLine)
 	{
+		_lockedBuildDiagnosticFilePath = filePath;
+		_lockedBuildDiagnosticLine = Math.Max(1, absoluteLine);
 		if (_codeEditor != null &&
 			!_codeEditor.IsDisposed &&
-			_codeEditor.TextLength > 0 &&
-			GetCodeViewSource() is FunctionSourceView codeView)
+			_codeEditor.TextLength > 0)
 		{
-			int lineIndex = Math.Clamp(absoluteLine - codeView.StartLine, 0, Math.Max(0, _codeEditor.Lines.Count - 1));
-			_codeEditor.MarkerDeleteAll(ScintillaMarkerSearchLine);
-			_codeEditor.Lines[lineIndex].MarkerAdd(ScintillaMarkerSearchLine);
-			int lineStart = _codeEditor.Lines[lineIndex].Position;
-			int lineEnd = lineIndex + 1 < _codeEditor.Lines.Count
-				? _codeEditor.Lines[lineIndex + 1].Position
-				: _codeEditor.TextLength;
-			_codeEditor.Focus();
-			_codeEditor.SetSelection(lineEnd, lineStart);
-			_codeEditor.FirstVisibleLine = Math.Max(0, lineIndex - Math.Max(2, _codeEditor.LinesOnScreen / 3));
-			_codeEditor.XOffset = 0;
-			ProtectCodeViewport(1600);
-			UpdateSourceEditStatus($"已定位编译错误：{absoluteLine} 行", Color.FromArgb(248, 113, 113));
-			return;
+			ApplyLockedBuildDiagnosticLineMarker();
+			if (TryGetDisplayedBuildDiagnosticLineIndex(out int lineIndex))
+			{
+				int lineStart = _codeEditor.Lines[lineIndex].Position;
+				int lineEnd = lineIndex + 1 < _codeEditor.Lines.Count
+					? _codeEditor.Lines[lineIndex + 1].Position
+					: _codeEditor.TextLength;
+				_codeEditor.Focus();
+				_codeEditor.SetSelection(lineEnd, lineStart);
+				_codeEditor.FirstVisibleLine = Math.Max(0, lineIndex - Math.Max(2, _codeEditor.LinesOnScreen / 3));
+				_codeEditor.XOffset = 0;
+				ProtectCodeViewport(1600);
+				UpdateSourceEditStatus($"已锁定编译错误：{_lockedBuildDiagnosticLine} 行", Color.FromArgb(248, 113, 113));
+				return;
+			}
 		}
 
 		if (_functionCodeBox != null && !_functionCodeBox.IsDisposed && _functionCodeBox.TextLength > 0)
 		{
 			_functionCodeBox.Focus();
-			SelectApproximateLineInFunction(absoluteLine);
+			SelectApproximateLineInFunction(_lockedBuildDiagnosticLine);
 			ProtectCodeViewport(1600);
-			UpdateSourceEditStatus($"已定位编译错误：{absoluteLine} 行", Color.FromArgb(248, 113, 113));
+			UpdateSourceEditStatus($"已锁定编译错误：{_lockedBuildDiagnosticLine} 行", Color.FromArgb(248, 113, 113));
 		}
+	}
+
+	private void ClearLockedBuildDiagnosticSourceLine()
+	{
+		_lockedBuildDiagnosticFilePath = "";
+		_lockedBuildDiagnosticLine = 0;
+		if (_codeEditor != null && !_codeEditor.IsDisposed)
+		{
+			_codeEditor.MarkerDeleteAll(ScintillaMarkerBuildDiagnosticLine);
+		}
+	}
+
+	private void ApplyLockedBuildDiagnosticLineMarker()
+	{
+		if (_codeEditor == null ||
+			_codeEditor.IsDisposed ||
+			_codeEditor.TextLength == 0)
+		{
+			return;
+		}
+
+		_codeEditor.MarkerDeleteAll(ScintillaMarkerBuildDiagnosticLine);
+		if (TryGetDisplayedBuildDiagnosticLineIndex(out int lineIndex))
+		{
+			_codeEditor.Lines[lineIndex].MarkerAdd(ScintillaMarkerBuildDiagnosticLine);
+		}
+	}
+
+	private bool TryGetDisplayedBuildDiagnosticLineIndex(out int lineIndex)
+	{
+		lineIndex = -1;
+		if (_lockedBuildDiagnosticLine <= 0 ||
+			string.IsNullOrWhiteSpace(_lockedBuildDiagnosticFilePath) ||
+			_codeEditor == null ||
+			_codeEditor.IsDisposed ||
+			GetCodeViewSource() is not FunctionSourceView codeView ||
+			!SourcePathsEqual(_lockedBuildDiagnosticFilePath, codeView.FilePath))
+		{
+			return false;
+		}
+
+		return TryGetKeilDisplayedLineIndex(_lockedBuildDiagnosticLine, codeView.StartLine, _codeEditor.Lines.Count, out lineIndex);
+	}
+
+	private static bool TryGetKeilDisplayedLineIndex(int absoluteLine, int sourceStartLine, int displayedLineCount, out int lineIndex)
+	{
+		lineIndex = absoluteLine - sourceStartLine;
+		return absoluteLine > 0 &&
+			sourceStartLine > 0 &&
+			displayedLineCount > 0 &&
+			lineIndex >= 0 &&
+			lineIndex < displayedLineCount;
+	}
+
+	private static bool SourcePathsEqual(string left, string right)
+	{
+		if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right))
+		{
+			return false;
+		}
+
+		try
+		{
+			left = Path.GetFullPath(left);
+			right = Path.GetFullPath(right);
+		}
+		catch
+		{
+			// Fall back to the raw text below.
+		}
+		return string.Equals(left.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+			right.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+			StringComparison.OrdinalIgnoreCase);
 	}
 
 	private void UpdateSourceEditStatus(string text, Color color)
@@ -19334,16 +21638,25 @@ public sealed partial class MainForm : Form
 		Log($"源码重构：{symbol.Name} -> {newName.Trim()}，{result.ReplacementCount} 处，文件 {result.ChangedFiles.Count} 个。");
 	}
 
-	private void DeclareLocalVariableFromCode(string identifier)
+	private void DeclareLocalVariableFromCode(string identifier, int contextAbsoluteLine = 0)
 	{
 		if (_codeEditor == null || _codeEditor.IsDisposed || _sourceEditSession == null)
 		{
+			UpdateSourceEditStatus("源码编辑未就绪", _muted);
 			return;
 		}
 
 		string name = NormalizeFocusedVariableName(identifier);
 		if (name.Length == 0)
 		{
+			UpdateSourceEditStatus("变量名无效", Color.FromArgb(248, 113, 113));
+			return;
+		}
+
+		if (_sourceEditSession.Dirty)
+		{
+			UpdateSourceEditStatus("先保存再声明变量", Color.FromArgb(245, 158, 11));
+			Log("源码未保存，已取消声明局部变量。请先 Ctrl+S 保存。");
 			return;
 		}
 
@@ -19359,8 +21672,12 @@ public sealed partial class MainForm : Form
 			return;
 		}
 
-		int lineIndex = _codeEditor.LineFromPosition(Math.Clamp(_codeEditor.CurrentPosition, 0, Math.Max(0, _codeEditor.TextLength)));
-		int absoluteLine = codeView.StartLine + lineIndex;
+		int absoluteLine = contextAbsoluteLine;
+		if (absoluteLine <= 0)
+		{
+			int lineIndex = _codeEditor.LineFromPosition(Math.Clamp(_codeEditor.CurrentPosition, 0, Math.Max(0, _codeEditor.TextLength)));
+			absoluteLine = codeView.StartLine + lineIndex;
+		}
 		if (!TryEnsureSourceSymbolIndexReady())
 		{
 			UpdateSourceEditStatus("源码索引构建中", _muted);
@@ -19368,26 +21685,51 @@ public sealed partial class MainForm : Form
 			return;
 		}
 
-		if (_sourceSymbolIndex.TryDeclareLocalVariable(codeView.FilePath, _codeEditor.Text, absoluteLine, name, typeName, out string newText, out SourceDiagnostic diagnostic))
+		string fileText = _sourceEditSession.Buffer.Text;
+		if (_sourceSymbolIndex.TryDeclareLocalVariable(codeView.FilePath, fileText, absoluteLine, name, typeName, out string newText, out SourceDiagnostic diagnostic))
 		{
-			_sourceEditInternalTextChange = true;
 			try
 			{
-				_codeEditor.Text = newText;
-				_functionCodeBox.Text = newText;
+				SourceEditSaveResult result = _sourceEditSession.Save(newText);
+				if (!result.Success)
+				{
+					UpdateSourceEditStatus(result.Conflict ? "外部冲突" : "保存失败", Color.FromArgb(248, 113, 113));
+					Log(result.Message);
+					return;
+				}
+
+				if (result.Buffer != null)
+				{
+					_sourceTextCache[result.Buffer.FilePath] = new SourceTextCacheEntry(result.Buffer.Text, result.Buffer.LastWriteUtc, result.Buffer.Length);
+				}
+
+				_lastFunctionCodeText = "";
+				_lastDataCodeText = "";
+				_lastFunctionAnalysisSignature = "";
+				_lastVisibleValuesText = "";
+				ClearFunctionIndex();
+				if (!string.IsNullOrWhiteSpace(_workDirectory))
+				{
+					WarmFunctionIndex(_workDirectory);
+				}
+				_offlineProgramModel = null;
+				_offlineCWorkerSignature = "";
+				_offlineApplicationSources = new List<FunctionSourceView>();
+				InvalidateSourceSymbolIndex();
+				QueueSourceSymbolIndexBuild();
+				RefreshCurrentFunctionSourceAfterSourceSave();
+				UpdateSourceEditStatus("已保存", _muted);
+				Log("源码重构：" + diagnostic.Message);
 			}
-			finally
+			catch (Exception ex)
 			{
-				_sourceEditInternalTextChange = false;
+				UpdateSourceEditStatus("保存失败", Color.FromArgb(248, 113, 113));
+				Log("声明局部变量保存失败：" + ex.Message);
 			}
-			_sourceEditSession.MarkDirty(newText);
-			UpdateSourceEditStatus("未保存", Color.FromArgb(245, 158, 11));
-			_sourceEditSaveTimer.Stop();
-			_sourceEditSaveTimer.Start();
-			Log("源码重构：" + diagnostic.Message);
 		}
 		else
 		{
+			UpdateSourceEditStatus("声明失败", Color.FromArgb(248, 113, 113));
 			Log("声明局部变量失败：" + diagnostic.Message);
 		}
 	}
@@ -20105,6 +22447,15 @@ public sealed partial class MainForm : Form
 		AssertNoTokenKind(lineResults, 5, "uint32_t", CodeTokenVisualKind.Keyword, failures);
 		AssertNoTokenKind(lineResults, 6, "return", CodeTokenVisualKind.Keyword, failures);
 
+		string valueAnnotation = BuildScintillaValueAnnotationText(new[] { "inputValue=12", "plainValue=34" });
+		if (valueAnnotation != "inputValue=12    plainValue=34" ||
+			valueAnnotation.Contains("//值:", StringComparison.Ordinal) ||
+			valueAnnotation.Contains('【') ||
+			valueAnnotation.Contains('】'))
+		{
+			failures.Add("Scintilla 数值 annotation 不能回退到旧注释样式。");
+		}
+
 		foreach (CodeTokenVisualKind kind in new[]
 		{
 			CodeTokenVisualKind.Keyword,
@@ -20126,10 +22477,13 @@ public sealed partial class MainForm : Form
 			}
 		}
 
+		AssertKeilEditorBehavior(failures);
+
 		if (failures.Count == 0)
 		{
 			output.WriteLine("SyntaxHighlightSelfTest: PASS");
 			output.WriteLine("keywords/comments/strings/numbers/functions/parameters are classified separately.");
+			output.WriteLine("keil editor indent/comment/block-comment/home/find/f3/goto-line/f12-definition/match-brace/scope/smart-enter/auto-pair/selection-wrap/duplicate-line/smart-indent/identifier-highlight/paste-normalize/f7-build rules are active.");
 			return 0;
 		}
 
@@ -20139,6 +22493,434 @@ public sealed partial class MainForm : Form
 			output.WriteLine("- " + failure);
 		}
 		return 2;
+	}
+
+	private static void AssertKeilEditorBehavior(List<string> failures)
+	{
+		if (BuildKeilNewLineIndent("  if (ready) {", 2) != "    ")
+		{
+			failures.Add("`{` 后换行没有按 2 空格增加一级缩进。");
+		}
+		if (BuildKeilNewLineIndent("  case 1:", 2) != "    ")
+		{
+			failures.Add("`case:` 后换行没有按 2 空格增加一级缩进。");
+		}
+		if (BuildKeilNewLineIndent("  default:", 2) != "    ")
+		{
+			failures.Add("`default:` 后换行没有按 2 空格增加一级缩进。");
+		}
+		if (BuildKeilNewLineIndent("  #define VALUE 1", 2) != "  ")
+		{
+			failures.Add("预处理行换行缩进被错误改变。");
+		}
+		if (BuildKeilNewLineIndent("  /* comment", 2) != "   * ")
+		{
+			failures.Add("块注释换行没有延续 ` * ` 前缀。");
+		}
+		if (CountKeilIndentRemoval("  }", 2) != 2)
+		{
+			failures.Add("右花括号行没有按 2 空格退一级缩进。");
+		}
+		if (CountKeilIndentRemoval("\t}", 2) != 1)
+		{
+			failures.Add("Tab 缩进行没有按一个 Tab 退缩进。");
+		}
+		if (CommentKeilLineText("  value = 1;") != "  // value = 1;")
+		{
+			failures.Add("Ctrl+/ 注释没有在缩进后插入 `// `。");
+		}
+		if (UncommentKeilLineText("  // value = 1;") != "  value = 1;")
+		{
+			failures.Add("Ctrl+/ 取消注释没有恢复缩进后的代码。");
+		}
+		if (UncommentKeilLineText("  //value = 1;") != "  value = 1;")
+		{
+			failures.Add("Ctrl+/ 取消无空格注释时没有兼容 `//code`。");
+		}
+		if (!IsKeilManualBuildShortcut(Keys.F7, control: false, shift: false, alt: false) ||
+			IsKeilManualBuildShortcut(Keys.F7, control: true, shift: false, alt: false) ||
+			IsKeilManualBuildShortcut(Keys.F7, control: false, shift: true, alt: false) ||
+			IsKeilManualBuildShortcut(Keys.F5, control: false, shift: false, alt: false))
+		{
+			failures.Add("F7 手动编译快捷键判定不符合 Keil 习惯。");
+		}
+		if (!IsKeilGotoLineShortcut(Keys.G, control: true, shift: false, alt: false) ||
+			IsKeilGotoLineShortcut(Keys.G, control: true, shift: true, alt: false) ||
+			IsKeilGotoLineShortcut(Keys.G, control: false, shift: false, alt: false) ||
+			IsKeilGotoLineShortcut(Keys.F7, control: true, shift: false, alt: false))
+		{
+			failures.Add("Ctrl+G 跳转行快捷键判定不符合 Keil 习惯。");
+		}
+		if (!IsKeilFindShortcut(Keys.F, control: true, shift: false, alt: false) ||
+			IsKeilFindShortcut(Keys.F, control: true, shift: true, alt: false) ||
+			!IsKeilFindNextShortcut(Keys.F3, control: false, alt: false) ||
+			IsKeilFindNextShortcut(Keys.F3, control: true, alt: false))
+		{
+			failures.Add("Ctrl+F/F3 查找快捷键判定不符合 Keil 习惯。");
+		}
+		if (!IsKeilGotoMatchingBraceShortcut(Keys.E, control: true, shift: false, alt: false) ||
+			IsKeilGotoMatchingBraceShortcut(Keys.E, control: true, shift: true, alt: false) ||
+			IsKeilGotoMatchingBraceShortcut(Keys.G, control: true, shift: false, alt: false) ||
+			IsKeilGotoMatchingBraceShortcut(Keys.E, control: false, shift: false, alt: false))
+		{
+			failures.Add("Ctrl+E 匹配括号跳转快捷键判定不符合 Keil 习惯。");
+		}
+		if (!IsKeilGotoDefinitionShortcut(Keys.F12, control: false, shift: false, alt: false) ||
+			IsKeilGotoDefinitionShortcut(Keys.F12, control: true, shift: false, alt: false) ||
+			IsKeilGotoDefinitionShortcut(Keys.F12, control: false, shift: true, alt: false) ||
+			IsKeilGotoDefinitionShortcut(Keys.F11, control: false, shift: false, alt: false))
+		{
+			failures.Add("F12 跳转定义快捷键判定不符合 Keil 习惯。");
+		}
+		if (!NormalizeKeilFindSeedText("  gValue\r\n+ 1  ").Equals("gValue + 1", StringComparison.Ordinal) ||
+			NormalizeKeilFindSeedText(new string('A', 160)).Length != 128)
+		{
+			failures.Add("Ctrl+F 查找种子文本没有正确归一化。");
+		}
+		if (GetNextKeilSearchResultIndex(3, -1, 1) != 0 ||
+			GetNextKeilSearchResultIndex(3, -1, -1) != 2 ||
+			GetNextKeilSearchResultIndex(3, 2, 1) != 0 ||
+			GetNextKeilSearchResultIndex(3, 0, -1) != 2 ||
+			GetNextKeilSearchResultIndex(0, 0, 1) != -1)
+		{
+			failures.Add("F3/Shift+F3 搜索结果循环索引不正确。");
+		}
+		if (!TryParseKeilGotoLineNumber("135", out int gotoPlain) ||
+			gotoPlain != 135 ||
+			!TryParseKeilGotoLineNumber("Src\\main.c:246", out int gotoPath) ||
+			gotoPath != 246 ||
+			!TryParseKeilGotoLineNumber("行 42", out int gotoChinese) ||
+			gotoChinese != 42 ||
+			TryParseKeilGotoLineNumber("abc", out _))
+		{
+			failures.Add("Ctrl+G 行号解析没有兼容纯数字、Keil 文件行格式或中文提示格式。");
+		}
+		if (CommentKeilLineText("    ") != "    ")
+		{
+			failures.Add("Ctrl+/ 不应修改纯空白行。");
+		}
+		AssertKeilBlockComment("value = 1;", 0, "value = 1;".Length, "/* value = 1; */", failures);
+		AssertKeilBlockComment("/* value = 1; */", 0, "/* value = 1; */".Length, "value = 1;", failures);
+		AssertKeilBlockComment("a();\r\nb();", 0, "a();\r\nb();".Length, "/*\r\na();\r\nb();\r\n*/", failures);
+		AssertKeilBlockComment("/*\r\na();\r\nb();\r\n*/", 0, "/*\r\na();\r\nb();\r\n*/".Length, "a();\r\nb();", failures);
+		if (TryBuildKeilBlockCommentEdit("a */ b", 0, "a */ b".Length, "\r\n", out _, out _, out _, out _, out _))
+		{
+			failures.Add("Ctrl+Shift+/ 不应对包含 `*/` 的选区生成嵌套块注释。");
+		}
+		if (GetKeilSmartHomeColumn("  value = 1;", 8) != 2 ||
+			GetKeilSmartHomeColumn("  value = 1;", 2) != 0 ||
+			GetKeilSmartHomeColumn("    ", 4) != 0)
+		{
+			failures.Add("Home 键没有在首个非空字符和行首之间切换。");
+		}
+		AssertKeilDuplicateLines("a();\r\nb();\r\n", 1, 1, "\r\n", 6, "a();\r\n", 6, 12, failures);
+		AssertKeilDuplicateLines("a();\r\nb();\r\nc();\r\n", 6, 14, "\r\n", 18, "b();\r\nc();\r\n", 18, 30, failures);
+		AssertKeilDuplicateLines("a();\r\nlast();", 7, 7, "\r\n", 13, "\r\nlast();", 15, 22, failures);
+		AssertKeilSmartIndent(
+			"void f()\r\n{\r\nif (ready)\r\n{\r\nRun();\r\n}\r\n}\r\n",
+			"void f()\r\n{\r\n  if (ready)\r\n  {\r\n    Run();\r\n  }\r\n}\r\n",
+			failures);
+		AssertKeilSmartIndent(
+			"#define BODY() do { Run(); } while (0)\r\nvoid f()\r\n{\r\nA();\r\n}\r\n",
+			"#define BODY() do { Run(); } while (0)\r\nvoid f()\r\n{\r\n  A();\r\n}\r\n",
+			failures);
+		AssertKeilSmartIndent(
+			"void f()\r\n{\r\nchar *s = \"{\"; // }\r\nA();\r\n}\r\n",
+			"void f()\r\n{\r\n  char *s = \"{\"; // }\r\n  A();\r\n}\r\n",
+			failures);
+		AssertKeilIdentifierReferences(
+			"value = value + other; // value\r\nchar *s = \"value\";\r\nValue = 1;\r\n",
+			2,
+			"value",
+			[0, 8],
+			failures);
+		if (TryGetKeilIdentifierAtCaret("if (ready) { return; }", 1, out _, out _, out _))
+		{
+			failures.Add("关键字不应触发同名引用高亮。");
+		}
+		if (!BuildKeilPasteText("\tif (ready)\n\t{\n\t\tRun();\n\t}", "  ", 2, 2, 2, "\r\n")
+			.Equals("if (ready)\r\n  {\r\n    Run();\r\n  }", StringComparison.Ordinal))
+		{
+			failures.Add("多行粘贴没有按当前 2 空格缩进归一化。");
+		}
+		if (!BuildKeilPasteText("\tA();\n\tB();", "call();", 6, 6, 2, "\n")
+			.Equals("  A();\n  B();", StringComparison.Ordinal))
+		{
+			failures.Add("非缩进位置粘贴时不应额外套用当前行缩进。");
+		}
+		if (!TryGetKeilDisplayedLineIndex(135, 133, 60, out int diagnosticLineIndex) ||
+			diagnosticLineIndex != 2 ||
+			TryGetKeilDisplayedLineIndex(132, 133, 60, out _) ||
+			TryGetKeilDisplayedLineIndex(193, 133, 60, out _))
+		{
+			failures.Add("编译错误行锁定没有严格映射到当前源码片段。");
+		}
+		AssertKeilAutoPair("  value = (", 11, '(', ")", 11, failures);
+		AssertKeilAutoPair("  text = \"", 10, '"', "\"", 10, failures);
+		if (TryBuildKeilAutoPairInsertion("// comment (", 12, '(', out _, out _))
+		{
+			failures.Add("注释里不应自动补全成对括号。");
+		}
+		if (TryBuildKeilAutoPairInsertion("call (value", 6, '(', out _, out _))
+		{
+			failures.Add("标识符前插入左括号时不应强行自动补右括号。");
+		}
+		if (!TryBuildKeilSkipOverTypedCloseEdit("func())", 6, ')', out int skipDeleteStart, out int skipDeleteLength, out int skipCaret) ||
+			skipDeleteStart != 5 ||
+			skipDeleteLength != 1 ||
+			skipCaret != 6)
+		{
+			failures.Add("闭合括号前重复输入闭合括号时没有跳过已有括号。");
+		}
+		if (!TryBuildKeilPairedBackspaceEdit("value = ();", 9, out int pairDeleteStart, out int pairDeleteLength, out int pairCaret) ||
+			pairDeleteStart != 8 ||
+			pairDeleteLength != 2 ||
+			pairCaret != 8)
+		{
+			failures.Add("Backspace 没有在空成对括号中删除两边括号。");
+		}
+		if (!TryBuildKeilPairedBackspaceEdit("value = \"\";", 9, out _, out _, out _) ||
+			TryBuildKeilPairedBackspaceEdit("// ()", 4, out _, out _, out _))
+		{
+			failures.Add("Backspace 成对删除没有正确区分代码上下文和注释上下文。");
+		}
+		AssertKeilSelectionAutoPair("if (a > b)", 4, 9, '(', "(a > b)", 5, 10, failures);
+		AssertKeilSelectionAutoPair("name = value;", 7, 12, '"', "\"value\"", 8, 13, failures);
+		AssertKeilSelectionAutoPair("line1\r\nline2", 0, 12, '{', "{line1\r\nline2}", 1, 13, failures);
+		if (TryBuildKeilSelectionAutoPairEdit("// value", 3, 8, '(', out _, out _, out _, out _, out _))
+		{
+			failures.Add("注释中的选区不应自动包裹成对符号。");
+		}
+		string scopeSample = "if ((gADC[2]) && ready) { value = table[index]; }";
+		AssertScopePair(scopeSample, scopeSample.IndexOf('(', StringComparison.Ordinal), '(', ')', failures);
+		AssertScopePair(scopeSample, scopeSample.IndexOf('[', StringComparison.Ordinal), '[', ']', failures);
+		AssertScopePair(scopeSample, scopeSample.IndexOf('{', StringComparison.Ordinal), '{', '}', failures);
+		AssertKeilMatchingBraceJump(scopeSample, scopeSample.IndexOf('{', StringComparison.Ordinal), scopeSample.LastIndexOf("}", StringComparison.Ordinal), failures);
+		AssertKeilMatchingBraceJump(scopeSample, scopeSample.IndexOf('[', StringComparison.Ordinal) + 1, scopeSample.IndexOf(']', StringComparison.Ordinal), failures);
+		AssertKeilMatchingBraceJump(scopeSample, scopeSample.LastIndexOf(")", StringComparison.Ordinal), scopeSample.IndexOf('(', StringComparison.Ordinal), failures);
+		string ignoredScopeSample = "char *s = \"[ignore]\"; // (ignore)\r\n";
+		if (FindBraceScopePairAt(ignoredScopeSample, ignoredScopeSample.IndexOf('[', StringComparison.Ordinal)).HasValue ||
+			FindBraceScopePairAt(ignoredScopeSample, ignoredScopeSample.IndexOf('(', StringComparison.Ordinal)).HasValue)
+		{
+			failures.Add("字符串或注释里的括号不应参与匹配高亮。");
+		}
+		if (TryGetKeilMatchingBraceJumpPosition(ignoredScopeSample, ignoredScopeSample.IndexOf('[', StringComparison.Ordinal), out _, out _) ||
+			TryGetKeilMatchingBraceJumpPosition(ignoredScopeSample, ignoredScopeSample.IndexOf('(', StringComparison.Ordinal), out _, out _) ||
+			TryGetKeilMatchingBraceJumpPosition(scopeSample, scopeSample.IndexOf("ready", StringComparison.Ordinal), out _, out _))
+		{
+			failures.Add("Ctrl+E 不应在字符串、注释或非括号位置触发跳转。");
+		}
+		AssertSmartPairEnter("  if (ready) {}", "{}", "\r\n    \r\n  ", "\r\n    ".Length, failures);
+		AssertSmartPairEnter("  value = func()", "()", "\n    \n  ", "\n    ".Length, failures, "\n");
+		AssertSmartPairEnter("  value = table[]", "[]", "\r\n    \r\n  ", "\r\n    ".Length, failures);
+		string ignoredEnterSample = "char *s = \"{}\"; // []";
+		if (TryBuildKeilSmartPairEnterInsertion(
+			ignoredEnterSample,
+			ignoredEnterSample.IndexOf('{', StringComparison.Ordinal) + 1,
+			2,
+			"\r\n",
+			out _,
+			out _) ||
+			TryBuildKeilSmartPairEnterInsertion(
+				ignoredEnterSample,
+				ignoredEnterSample.IndexOf('[', StringComparison.Ordinal) + 1,
+				2,
+				"\r\n",
+				out _,
+				out _))
+		{
+			failures.Add("字符串或注释里的括号不应触发 Enter 自动拆行。");
+		}
+	}
+
+	private static void AssertKeilDuplicateLines(
+		string text,
+		int selectionStart,
+		int selectionEnd,
+		string newLine,
+		int expectedInsertPosition,
+		string expectedInsertion,
+		int expectedSelectionStart,
+		int expectedSelectionEnd,
+		List<string> failures)
+	{
+		if (!TryBuildKeilDuplicateLinesEdit(
+				text,
+				selectionStart,
+				selectionEnd,
+				newLine,
+				out int insertPosition,
+				out string insertion,
+				out int newSelectionStart,
+				out int newSelectionEnd) ||
+			insertPosition != expectedInsertPosition ||
+			!insertion.Equals(expectedInsertion, StringComparison.Ordinal) ||
+			newSelectionStart != expectedSelectionStart ||
+			newSelectionEnd != expectedSelectionEnd)
+		{
+			failures.Add("Ctrl+D 复制当前行或选中行没有生成预期文本。");
+		}
+	}
+
+	private static void AssertKeilSmartIndent(string text, string expectedText, List<string> failures)
+	{
+		if (!TryBuildKeilSmartIndentEdit(
+				text,
+				0,
+				text.Length,
+				2,
+				out int replaceStart,
+				out int replaceLength,
+				out string replacement,
+				out int selectionStart,
+				out int selectionEnd) ||
+			replaceStart != 0 ||
+			replaceLength != text.Length ||
+			!replacement.Equals(expectedText, StringComparison.Ordinal) ||
+			selectionStart != 0 ||
+			selectionEnd != expectedText.Length)
+		{
+			failures.Add("Ctrl+I 智能缩进没有按 2 空格 C 代码层级生成预期文本。");
+		}
+	}
+
+	private static void AssertKeilIdentifierReferences(
+		string text,
+		int caret,
+		string expectedIdentifier,
+		IReadOnlyList<int> expectedStarts,
+		List<string> failures)
+	{
+		if (!TryGetKeilIdentifierAtCaret(text, caret, out int start, out int length, out string identifier) ||
+			!identifier.Equals(expectedIdentifier, StringComparison.Ordinal))
+		{
+			failures.Add("光标所在标识符没有被正确识别。");
+			return;
+		}
+
+		List<int> starts = BuildKeilIdentifierReferenceSpans(text, start, length, identifier)
+			.Select(span => span.Start)
+			.ToList();
+		if (!starts.SequenceEqual(expectedStarts))
+		{
+			failures.Add("同名引用高亮没有正确跳过注释、字符串或大小写不同的标识符。");
+		}
+	}
+
+	private static void AssertKeilBlockComment(
+		string text,
+		int selectionStart,
+		int selectionEnd,
+		string expectedReplacement,
+		List<string> failures)
+	{
+		if (!TryBuildKeilBlockCommentEdit(
+				text,
+				selectionStart,
+				selectionEnd,
+				"\r\n",
+				out int replaceStart,
+				out int replaceLength,
+				out string replacement,
+				out int newSelectionStart,
+				out int newSelectionEnd) ||
+			replaceStart != Math.Min(selectionStart, selectionEnd) ||
+			replaceLength != Math.Abs(selectionEnd - selectionStart) ||
+			!replacement.Equals(expectedReplacement, StringComparison.Ordinal) ||
+			newSelectionStart != replaceStart ||
+			newSelectionEnd != replaceStart + expectedReplacement.Length)
+		{
+			failures.Add("Ctrl+Shift+/ 块注释选区没有生成预期文本。");
+		}
+	}
+
+	private static void AssertKeilAutoPair(
+		string text,
+		int position,
+		char typedChar,
+		string expectedInsertion,
+		int expectedCaret,
+		List<string> failures)
+	{
+		if (!TryBuildKeilAutoPairInsertion(text, position, typedChar, out string insertion, out int caretPosition) ||
+			!insertion.Equals(expectedInsertion, StringComparison.Ordinal) ||
+			caretPosition != expectedCaret)
+		{
+			failures.Add($"自动补全 `{typedChar}` 没有生成预期闭合符号。");
+		}
+	}
+
+	private static void AssertKeilSelectionAutoPair(
+		string text,
+		int selectionStart,
+		int selectionEnd,
+		char typedChar,
+		string expectedReplacement,
+		int expectedSelectionStart,
+		int expectedSelectionEnd,
+		List<string> failures)
+	{
+		if (!TryBuildKeilSelectionAutoPairEdit(
+				text,
+				selectionStart,
+				selectionEnd,
+				typedChar,
+				out int replaceStart,
+				out int replaceLength,
+				out string replacement,
+				out int newSelectionStart,
+				out int newSelectionEnd) ||
+			replaceStart != Math.Min(selectionStart, selectionEnd) ||
+			replaceLength != Math.Abs(selectionEnd - selectionStart) ||
+			!replacement.Equals(expectedReplacement, StringComparison.Ordinal) ||
+			newSelectionStart != expectedSelectionStart ||
+			newSelectionEnd != expectedSelectionEnd)
+		{
+			failures.Add($"选区自动包裹 `{typedChar}` 没有生成预期文本。");
+		}
+	}
+
+	private static void AssertSmartPairEnter(
+		string text,
+		string pairText,
+		string expectedInsertion,
+		int expectedCaretOffset,
+		List<string> failures,
+		string newLine = "\r\n")
+	{
+		int open = text.IndexOf(pairText, StringComparison.Ordinal);
+		if (open < 0 ||
+			!TryBuildKeilSmartPairEnterInsertion(text, open + 1, 2, newLine, out string insertion, out int caretOffset) ||
+			!insertion.Equals(expectedInsertion, StringComparison.Ordinal) ||
+			caretOffset != expectedCaretOffset)
+		{
+			failures.Add($"Enter 自动拆 `{pairText}` 未生成预期缩进。");
+		}
+	}
+
+	private static void AssertScopePair(string text, int caret, char expectedOpen, char expectedClose, List<string> failures)
+	{
+		(int Open, int Close)? pair = FindBraceScopePairAt(text, caret);
+		if (!pair.HasValue ||
+			pair.Value.Open < 0 ||
+			pair.Value.Close < 0 ||
+			pair.Value.Open >= text.Length ||
+			pair.Value.Close >= text.Length ||
+			text[pair.Value.Open] != expectedOpen ||
+			text[pair.Value.Close] != expectedClose)
+		{
+			failures.Add($"括号匹配未正确识别 `{expectedOpen}{expectedClose}`。");
+		}
+	}
+
+	private static void AssertKeilMatchingBraceJump(string text, int caret, int expectedTarget, List<string> failures)
+	{
+		if (!TryGetKeilMatchingBraceJumpPosition(text, caret, out int source, out int target) ||
+			source < 0 ||
+			target != expectedTarget)
+		{
+			failures.Add("Ctrl+E 匹配括号跳转没有定位到预期括号。");
+		}
 	}
 
 	private static void AssertTokenKind(
