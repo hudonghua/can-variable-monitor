@@ -61,6 +61,10 @@ internal sealed class MonitorProfile
     public int UiDpi { get; set; } = 96;
     public float FunctionCodeFontSize { get; set; } = 10.5f;
     public float ProgramTreeFontSize { get; set; } = 15f;
+    public string KeilProjectPath { get; set; } = "";
+    public string KeilTargetName { get; set; } = "";
+    public bool SourceEditEnabled { get; set; } = true;
+    public bool AutoBuildAfterSourceSave { get; set; } = true;
     public List<int> MonitorColumnWidths { get; set; } = new();
     public List<string> OfflineRootFunctions { get; set; } = new();
     public List<WatchItem> Variables { get; set; } = new();

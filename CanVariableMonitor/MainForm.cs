@@ -20,7 +20,7 @@ namespace CanVariableMonitor;
 
 public sealed partial class MainForm : Form
 {
-	private const string UpperComputerVersion = "V1.42";
+	private const string UpperComputerVersion = "V1.43";
 
 	private const string AppDisplayName = "上位机监控";
 
@@ -198,6 +198,10 @@ public sealed partial class MainForm : Form
 
 	private readonly System.Windows.Forms.Timer _codeRefreshTimer = new System.Windows.Forms.Timer();
 
+	private readonly System.Windows.Forms.Timer _sourceEditSaveTimer = new System.Windows.Forms.Timer();
+
+	private readonly System.Windows.Forms.Timer _sourceEditBuildTimer = new System.Windows.Forms.Timer();
+
 	private readonly System.Windows.Forms.Timer _valueRefreshTimer = new System.Windows.Forms.Timer();
 
 	private readonly System.Windows.Forms.Timer _suggestionTimer = new System.Windows.Forms.Timer();
@@ -294,6 +298,12 @@ public sealed partial class MainForm : Form
 
 	private Button _functionForwardButton;
 
+	private Label? _sourceEditStatusLabel;
+
+	private ListBox? _buildDiagnosticsList;
+
+	private RowStyle? _buildDiagnosticsRow;
+
 	private RichTextBox _dataCodeBox;
 
 	private CodeValueOverlay _codeValueOverlay;
@@ -327,6 +337,28 @@ public sealed partial class MainForm : Form
 	private FunctionSourceView? _currentFunctionSource;
 
 	private FunctionSourceView? _codeViewSource;
+
+	private SourceEditSession? _sourceEditSession;
+
+	private SourceSymbolIndex _sourceSymbolIndex = SourceSymbolIndex.Empty;
+
+	private readonly List<KeilBuildDiagnostic> _lastBuildDiagnostics = new List<KeilBuildDiagnostic>();
+
+	private bool _sourceEditInternalTextChange;
+
+	private bool _sourceEditSaving;
+
+	private bool _sourceBuildRunning;
+
+	private bool _sourceBuildPending;
+
+	private string _keilProjectPath = "";
+
+	private string _keilTargetName = "";
+
+	private bool _sourceEditEnabled = true;
+
+	private bool _autoBuildAfterSourceSave = true;
 
 	private readonly Stack<CodeViewSnapshot> _functionHistory = new Stack<CodeViewSnapshot>();
 
@@ -1004,6 +1036,18 @@ public sealed partial class MainForm : Form
 			}
 		};
 		_codeRefreshTimer.Start();
+		_sourceEditSaveTimer.Interval = 1500;
+		_sourceEditSaveTimer.Tick += async delegate
+		{
+			_sourceEditSaveTimer.Stop();
+			await SaveSourceEditNowAsync(scheduleBuild: true).ConfigureAwait(true);
+		};
+		_sourceEditBuildTimer.Interval = 3000;
+		_sourceEditBuildTimer.Tick += async delegate
+		{
+			_sourceEditBuildTimer.Stop();
+			await RunSourceEditBuildAsync().ConfigureAwait(true);
+		};
 		_valueRefreshTimer.Interval = WatchValueFlushMs;
 		_valueRefreshTimer.Tick += delegate
 		{
@@ -1181,6 +1225,10 @@ public sealed partial class MainForm : Form
 		_mapReloadTimer.Dispose();
 		_codeRefreshTimer.Stop();
 		_codeRefreshTimer.Dispose();
+		_sourceEditSaveTimer.Stop();
+		_sourceEditSaveTimer.Dispose();
+		_sourceEditBuildTimer.Stop();
+		_sourceEditBuildTimer.Dispose();
 		_valueRefreshTimer.Stop();
 		_valueRefreshTimer.Dispose();
 		_visibleDataRefreshTimer.Stop();
@@ -2562,16 +2610,19 @@ public sealed partial class MainForm : Form
 		};
 		layout.RowStyles.Add(new RowStyle(SizeType.Absolute, Ui(32)));
 		layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+		_buildDiagnosticsRow = new RowStyle(SizeType.Absolute, 0f);
+		layout.RowStyles.Add(_buildDiagnosticsRow);
 		TableLayoutPanel header = new TableLayoutPanel
 		{
 			Dock = DockStyle.Fill,
-			ColumnCount = 3,
+			ColumnCount = 4,
 			RowCount = 1,
 			Margin = Padding.Empty,
 			BackColor = _gridHeader,
 			Tag = "header"
 		};
 		header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+		header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, Ui(150)));
 		header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, Ui(72)));
 		header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, Ui(72)));
 		_dataCodeTitle = new Label
@@ -2585,6 +2636,16 @@ public sealed partial class MainForm : Form
 			Font = new Font("Microsoft YaHei UI", 9f, FontStyle.Bold)
 		};
 		_functionCodeTitle = _dataCodeTitle;
+		_sourceEditStatusLabel = new Label
+		{
+			Dock = DockStyle.Fill,
+			Text = "源码只读",
+			TextAlign = ContentAlignment.MiddleRight,
+			Padding = new Padding(Ui(4), 0, Ui(6), 0),
+			ForeColor = _muted,
+			BackColor = _gridHeader,
+			Font = new Font("Microsoft YaHei UI", 8.5f)
+		};
 		_functionBackButton = new Button
 		{
 			Dock = DockStyle.Fill,
@@ -2616,8 +2677,9 @@ public sealed partial class MainForm : Form
 			NavigateFunctionForward();
 		};
 		header.Controls.Add(_dataCodeTitle, 0, 0);
-		header.Controls.Add(_functionBackButton, 1, 0);
-		header.Controls.Add(_functionForwardButton, 2, 0);
+		header.Controls.Add(_sourceEditStatusLabel, 1, 0);
+		header.Controls.Add(_functionBackButton, 2, 0);
+		header.Controls.Add(_functionForwardButton, 3, 0);
 		_visibleValuesLabel = new Label
 		{
 			Visible = false,
@@ -2665,8 +2727,21 @@ public sealed partial class MainForm : Form
 		codeHost.Controls.Add(_codeEditor);
 		codeHost.Controls.Add(_codeValueOverlay);
 		_codeValueOverlay.BringToFront();
+		_buildDiagnosticsList = new ListBox
+		{
+			Dock = DockStyle.Fill,
+			Visible = false,
+			BorderStyle = BorderStyle.FixedSingle,
+			BackColor = _surfaceAlt,
+			ForeColor = _ink,
+			Font = new Font("Consolas", 9f),
+			HorizontalScrollbar = true,
+			Tag = "surfaceAlt"
+		};
+		_buildDiagnosticsList.DoubleClick += BuildDiagnosticsListDoubleClick;
 		layout.Controls.Add(header, 0, 0);
 		layout.Controls.Add(codeHost, 0, 1);
+		layout.Controls.Add(_buildDiagnosticsList, 0, 2);
 		panel.Controls.Add(layout);
 		return panel;
 	}
@@ -2676,7 +2751,7 @@ public sealed partial class MainForm : Form
 		var editor = new Scintilla
 		{
 			Dock = DockStyle.Fill,
-			ReadOnly = true,
+			ReadOnly = false,
 			BorderStyle = ScintillaNET.BorderStyle.None,
 			HScrollBar = true,
 			VScrollBar = true,
@@ -2701,6 +2776,7 @@ public sealed partial class MainForm : Form
 		};
 		editor.MouseWheel += CodeEditorMouseWheel;
 		editor.KeyDown += CodeEditorKeyDown;
+		editor.TextChanged += CodeEditorTextChanged;
 		editor.UpdateUI += CodeEditorUpdateUI;
 		editor.ContextMenuStrip = CreateCodeWatchContextMenu(editor);
 		ApplyScintillaTheme(editor);
@@ -3411,6 +3487,12 @@ public sealed partial class MainForm : Form
 		{
 			ClearOfflineSimulationProgramCache();
 			ClearFunctionIndex();
+			_sourceEditSession = null;
+			_sourceEditSaveTimer.Stop();
+			_sourceEditBuildTimer.Stop();
+			_sourceSymbolIndex = SourceSymbolIndex.Empty;
+			_lastBuildDiagnostics.Clear();
+			ShowBuildDiagnostics(Array.Empty<KeilBuildDiagnostic>(), "");
 			_offlineRootSelectionText = "";
 			_mapFilePath = "";
 			_mapLastWrite = default(DateTime);
@@ -3471,6 +3553,7 @@ public sealed partial class MainForm : Form
 			{
 				_symbols = symbols;
 				RebuildSymbolIndexes();
+				RebuildSourceSymbolIndex();
 				RefreshWatchMetadataFromSymbols();
 				_mapFilePath = text;
 				_mapLastWrite = File.GetLastWriteTimeUtc(text);
@@ -3530,6 +3613,7 @@ public sealed partial class MainForm : Form
 				Log($"变量文件已读取：{Path.GetFileName(path)}，RAM 变量 {_symbols.Count} 个。");
 			}
 			RebuildSymbolIndexes();
+			RebuildSourceSymbolIndex();
 			RefreshWatchMetadataFromSymbols();
 			_mapLastWrite = File.GetLastWriteTimeUtc(path);
 			_symbolCountLabel.Text = $"已读取 {_symbols.Count} 个 RAM 变量";
@@ -10711,6 +10795,7 @@ public sealed partial class MainForm : Form
 		_functionCodePanel.Visible = true;
 		_functionCodePanel.BringToFront();
 		_runtimeLocationLabel.Text = sourceView.FunctionName;
+		BeginSourceEditSessionForCurrentCodeView();
 		UpdateFunctionNavButtons();
 		ScheduleProgramTreeFocusRefresh(navigationVersion);
 		bool restoreViewport = restoreSnapshot.HasValue;
@@ -11499,6 +11584,10 @@ public sealed partial class MainForm : Form
 
 		if (e.Button == MouseButtons.Right)
 		{
+			if (TryGetIdentifierAtCodePoint(_codeEditor, e.Location, out int start, out int length, out _))
+			{
+				SelectScintillaIdentifierRange(start, length);
+			}
 			ShowCodeWatchContextMenu(_codeEditor, e.Location);
 		}
 	}
@@ -12110,13 +12199,58 @@ public sealed partial class MainForm : Form
 		gotoDefinition.Enabled = !string.IsNullOrWhiteSpace(identifier);
 		gotoDefinition.Click += delegate
 		{
-			if (!TryGotoDefinitionFromIdentifier(identifier))
+			if (TryResolveSourceSymbolFromCodeEditor(identifier, out SourceSymbol symbol) && (symbol.Definition ?? symbol.Declaration) is SourceLocation location)
+			{
+				NavigateToSourceLocation(location.FilePath, location.Line, pushCurrent: _currentFunctionSource != null);
+			}
+			else if (!TryGotoDefinitionFromIdentifier(identifier))
 			{
 				FillProgramSearchFromCode(identifier);
 				RunProgramSearch();
 			}
 		};
 		menu.Items.Add(gotoDefinition);
+
+		if (codeOwner)
+		{
+			bool hasSourceSymbol = TryResolveSourceSymbolFromCodeEditor(identifier, out SourceSymbol sourceSymbol);
+			ToolStripMenuItem gotoDeclaration = new ToolStripMenuItem("转到声明");
+			gotoDeclaration.Enabled = hasSourceSymbol && sourceSymbol.Declaration != null;
+			gotoDeclaration.Click += delegate
+			{
+				if (sourceSymbol.Declaration is SourceLocation location)
+				{
+					NavigateToSourceLocation(location.FilePath, location.Line, pushCurrent: _currentFunctionSource != null);
+				}
+			};
+			menu.Items.Add(gotoDeclaration);
+
+			ToolStripMenuItem renameVariable = new ToolStripMenuItem("重命名变量...");
+			renameVariable.Enabled = hasSourceSymbol &&
+				sourceSymbol.Kind != SourceSymbolKind.Function &&
+				sourceSymbol.Kind != SourceSymbolKind.Macro;
+			renameVariable.Click += async delegate
+			{
+				await RenameSourceSymbolAsync(sourceSymbol).ConfigureAwait(true);
+			};
+			menu.Items.Add(renameVariable);
+
+			ToolStripMenuItem declareLocal = new ToolStripMenuItem("声明新局部变量...");
+			declareLocal.Enabled = !string.IsNullOrWhiteSpace(identifier) && !hasSourceSymbol;
+			declareLocal.Click += delegate
+			{
+				DeclareLocalVariableFromCode(identifier);
+			};
+			menu.Items.Add(declareLocal);
+
+			ToolStripMenuItem viewBuildErrors = new ToolStripMenuItem("查看 Keil 错误");
+			viewBuildErrors.Enabled = _lastBuildDiagnostics.Count > 0;
+			viewBuildErrors.Click += delegate
+			{
+				ShowBuildDiagnostics(_lastBuildDiagnostics, "");
+			};
+			menu.Items.Add(viewBuildErrors);
+		}
 
 		ToolStripMenuItem addWatch = new ToolStripMenuItem("加入监控");
 		addWatch.Enabled = !string.IsNullOrWhiteSpace(identifier);
@@ -12566,6 +12700,11 @@ public sealed partial class MainForm : Form
 				IsKnownFunctionName(identifier) &&
 				(_currentFunctionSource == null || !identifier.Equals(_currentFunctionSource.FunctionName, StringComparison.OrdinalIgnoreCase));
 			SetScintillaFunctionHoverHighlight(hoverStart, hoverLength, _lastFunctionHoverNavigable);
+			if (TryResolveSourceSymbolAtScintillaPosition(index, identifier, out SourceSymbol symbol))
+			{
+				string hover = _sourceSymbolIndex.BuildHoverText(symbol).Replace("\r\n", "  ", StringComparison.Ordinal).Replace('\n', ' ');
+				UpdateSourceEditStatus(hover.Length > 40 ? hover[..40] + "..." : hover, symbol.HasAddress ? _accent : _muted);
+			}
 		}
 		else
 		{
@@ -12592,6 +12731,15 @@ public sealed partial class MainForm : Form
 
 	private void CodeEditorKeyDown(object? sender, KeyEventArgs e)
 	{
+		if (e.Control && e.KeyCode == Keys.S)
+		{
+			_sourceEditSaveTimer.Stop();
+			_ = SaveSourceEditNowAsync(scheduleBuild: true);
+			e.SuppressKeyPress = true;
+			e.Handled = true;
+			return;
+		}
+
 		if (e.Control && e.KeyCode == Keys.C && _codeEditor != null && !_codeEditor.IsDisposed)
 		{
 			string selectedText = _codeEditor.SelectedText;
@@ -17532,8 +17680,21 @@ public sealed partial class MainForm : Form
 			includeValues,
 			out string nextText,
 			lineRange,
-			inlineValuesInText: includeValues,
+			inlineValuesInText: false,
 			includeLineNumbersInText: false);
+		if (_sourceEditSession != null && _sourceEditSession.Dirty)
+		{
+			lastText = _codeEditor.Text;
+			_functionCodeBox.Text = _codeEditor.Text;
+			RefreshScintillaLexing();
+			ApplyScintillaSemanticStyles(BuildEditorRenderLinesFromScintilla());
+			if (includeValues)
+			{
+				ApplyScintillaRuntimeHighlights(renderedLines, renderSource);
+			}
+			UpdateSourceEditStatus("未保存", Color.FromArgb(245, 158, 11));
+			return;
+		}
 		int firstVisibleLine = _codeEditor.FirstVisibleLine;
 		int currentPosition = Math.Clamp(_codeEditor.CurrentPosition, 0, Math.Max(0, _codeEditor.TextLength));
 		int selectionStart = Math.Clamp(_codeEditor.SelectionStart, 0, Math.Max(0, _codeEditor.TextLength));
@@ -17550,6 +17711,7 @@ public sealed partial class MainForm : Form
 			_codeEditor.ReadOnly = false;
 			try
 			{
+				_sourceEditInternalTextChange = true;
 				_codeEditor.Text = nextText;
 				_functionCodeBox.Text = nextText;
 				_codeEditor.Margins.ClearAllText();
@@ -17559,6 +17721,7 @@ public sealed partial class MainForm : Form
 			}
 			finally
 			{
+				_sourceEditInternalTextChange = false;
 				_codeEditor.ReadOnly = wasReadOnly;
 			}
 		}
@@ -18553,6 +18716,517 @@ public sealed partial class MainForm : Form
 		AppendRtfText(builder, text.Substring(index, close - index + 1), valueColorIndex, valueHighlightIndex, lineHighlightIndex);
 		length = close - index + 1;
 		return true;
+	}
+
+	private void BeginSourceEditSessionForCurrentCodeView()
+	{
+		if (!_sourceEditEnabled)
+		{
+			UpdateSourceEditStatus("源码编辑已关闭", _muted);
+			return;
+		}
+
+		FunctionSourceView? codeView = GetCodeViewSource();
+		if (codeView == null || string.IsNullOrWhiteSpace(codeView.FilePath) || !File.Exists(codeView.FilePath))
+		{
+			_sourceEditSession = null;
+			UpdateSourceEditStatus("源码只读", _muted);
+			return;
+		}
+
+		if (_sourceEditSession != null &&
+			_sourceEditSession.FilePath.Equals(codeView.FilePath, StringComparison.OrdinalIgnoreCase) &&
+			!_sourceEditSession.Dirty)
+		{
+			UpdateSourceEditStatus("已保存", _muted);
+			return;
+		}
+
+		if (_sourceEditSession != null &&
+			_sourceEditSession.Dirty &&
+			!_sourceEditSession.FilePath.Equals(codeView.FilePath, StringComparison.OrdinalIgnoreCase))
+		{
+			UpdateSourceEditStatus("未保存", Color.FromArgb(245, 158, 11));
+			return;
+		}
+
+		try
+		{
+			_sourceEditSession = SourceEditSession.Load(codeView.FilePath);
+			UpdateSourceEditStatus("已保存", _muted);
+			EnsureSourceSymbolIndex();
+		}
+		catch (Exception ex)
+		{
+			_sourceEditSession = null;
+			UpdateSourceEditStatus("源码不可写", Color.FromArgb(248, 113, 113));
+			Log("源码编辑会话打开失败：" + ex.Message);
+		}
+	}
+
+	private void EnsureSourceSymbolIndex()
+	{
+		if (string.IsNullOrWhiteSpace(_workDirectory) || !Directory.Exists(_workDirectory))
+		{
+			_sourceSymbolIndex = SourceSymbolIndex.Empty;
+			return;
+		}
+
+		if (_sourceSymbolIndex.Root.Equals(_workDirectory, StringComparison.OrdinalIgnoreCase) &&
+			_sourceSymbolIndex.Symbols.Count > 0)
+		{
+			return;
+		}
+
+		RebuildSourceSymbolIndex();
+	}
+
+	private void RebuildSourceSymbolIndex()
+	{
+		try
+		{
+			_sourceSymbolIndex = SourceSymbolIndex.Build(_workDirectory, _symbols);
+		}
+		catch (Exception ex)
+		{
+			_sourceSymbolIndex = SourceSymbolIndex.Empty;
+			Log("源码符号索引失败：" + ex.Message);
+		}
+	}
+
+	private void CodeEditorTextChanged(object? sender, EventArgs e)
+	{
+		if (_sourceEditInternalTextChange ||
+			!_sourceEditEnabled ||
+			_codeEditor == null ||
+			_codeEditor.IsDisposed ||
+			_currentFunctionSource == null)
+		{
+			return;
+		}
+
+		BeginSourceEditSessionForCurrentCodeView();
+		if (_sourceEditSession == null)
+		{
+			return;
+		}
+
+		_sourceEditSession.MarkDirty(_codeEditor.Text);
+		if (!_sourceEditSession.Dirty)
+		{
+			UpdateSourceEditStatus("已保存", _muted);
+			return;
+		}
+
+		_functionCodeBox.Text = _codeEditor.Text;
+		UpdateSourceEditStatus("未保存", Color.FromArgb(245, 158, 11));
+		_sourceEditBuildTimer.Stop();
+		_sourceEditSaveTimer.Stop();
+		_sourceEditSaveTimer.Start();
+	}
+
+	private async Task SaveSourceEditNowAsync(bool scheduleBuild)
+	{
+		if (_sourceEditSaving || _sourceEditSession == null || _codeEditor == null || _codeEditor.IsDisposed)
+		{
+			return;
+		}
+
+		if (!_sourceEditSession.Dirty)
+		{
+			UpdateSourceEditStatus("已保存", _muted);
+			return;
+		}
+
+		_sourceEditSaving = true;
+		UpdateSourceEditStatus("保存中", _accent);
+		string text = _codeEditor.Text;
+		await Task.Yield();
+		try
+		{
+			SourceEditSaveResult result = _sourceEditSession.Save(text);
+			if (!result.Success)
+			{
+				UpdateSourceEditStatus(result.Conflict ? "外部冲突" : "保存失败", Color.FromArgb(248, 113, 113));
+				Log(result.Message);
+				return;
+			}
+
+			if (result.Buffer != null)
+			{
+				_sourceTextCache[result.Buffer.FilePath] = new SourceTextCacheEntry(result.Buffer.Text, result.Buffer.LastWriteUtc, result.Buffer.Length);
+			}
+
+			_functionCodeBox.Text = text;
+			_lastFunctionCodeText = "";
+			_lastDataCodeText = "";
+			_lastFunctionAnalysisSignature = "";
+			_lastVisibleValuesText = "";
+			ClearFunctionIndex();
+			if (!string.IsNullOrWhiteSpace(_workDirectory))
+			{
+				WarmFunctionIndex(_workDirectory);
+			}
+			_offlineProgramModel = null;
+			_offlineCWorkerSignature = "";
+			_offlineApplicationSources = new List<FunctionSourceView>();
+			RebuildSourceSymbolIndex();
+			RefreshCurrentFunctionSourceAfterSourceSave();
+			UpdateSourceEditStatus("已保存", _muted);
+			Log(result.Message);
+			if (scheduleBuild && _autoBuildAfterSourceSave)
+			{
+				_sourceEditBuildTimer.Stop();
+				_sourceEditBuildTimer.Start();
+			}
+		}
+		catch (Exception ex)
+		{
+			UpdateSourceEditStatus("保存失败", Color.FromArgb(248, 113, 113));
+			Log("源码保存失败：" + ex.Message);
+		}
+		finally
+		{
+			_sourceEditSaving = false;
+		}
+	}
+
+	private void RefreshCurrentFunctionSourceAfterSourceSave()
+	{
+		if (_currentFunctionSource == null || _sourceEditSession == null)
+		{
+			return;
+		}
+
+		FunctionSourceView old = _currentFunctionSource;
+		if (TryLoadFunctionSourceFromFile(old.FilePath, old.FunctionName, out FunctionSourceView? refreshed) && refreshed != null)
+		{
+			_currentFunctionSource = refreshed;
+			_codeViewSource = BuildFunctionCodeContextSource(refreshed);
+			_currentFunctionIdentifiers = BuildIdentifierSet(refreshed.Lines);
+			UpdateFunctionCodeTitle();
+		}
+	}
+
+	private async Task RunSourceEditBuildAsync()
+	{
+		if (_sourceBuildRunning)
+		{
+			_sourceBuildPending = true;
+			return;
+		}
+		if (string.IsNullOrWhiteSpace(_workDirectory) || !Directory.Exists(_workDirectory))
+		{
+			return;
+		}
+
+		if (_sourceEditSession != null && _sourceEditSession.Dirty)
+		{
+			await SaveSourceEditNowAsync(scheduleBuild: false).ConfigureAwait(true);
+			if (_sourceEditSession.Dirty)
+			{
+				return;
+			}
+		}
+
+		_sourceBuildRunning = true;
+		UpdateSourceEditStatus("编译中", _accent);
+		try
+		{
+			KeilBuildResult result = await Task.Run(() => KeilBuildService.BuildProject(_workDirectory, _keilProjectPath, _keilTargetName)).ConfigureAwait(true);
+			_keilProjectPath = result.ProjectFile;
+			_keilTargetName = result.TargetName;
+			_lastBuildDiagnostics.Clear();
+			_lastBuildDiagnostics.AddRange(result.Diagnostics);
+			ShowBuildDiagnostics(result.Diagnostics, result.LogPath);
+			if (result.Success)
+			{
+				UpdateSourceEditStatus("编译通过", Color.FromArgb(74, 222, 128));
+				if (!string.IsNullOrWhiteSpace(result.MapPath) && File.Exists(result.MapPath))
+				{
+					LoadMapFile(result.MapPath);
+				}
+				else
+				{
+					LoadLatestMapFromDirectory(_workDirectory);
+				}
+				ClearFunctionIndex();
+				WarmFunctionIndex(_workDirectory);
+				RebuildSourceSymbolIndex();
+				StartProgramGraphAnalysis(_workDirectory);
+				SaveDefaultProfileQuietly();
+			}
+			else
+			{
+				UpdateSourceEditStatus("编译失败", Color.FromArgb(248, 113, 113));
+			}
+			Log(result.Message + (string.IsNullOrWhiteSpace(result.LogPath) ? "" : "  " + result.LogPath));
+		}
+		catch (Exception ex)
+		{
+			UpdateSourceEditStatus("编译失败", Color.FromArgb(248, 113, 113));
+			Log("自动 Keil 编译失败：" + ex.Message);
+		}
+		finally
+		{
+			_sourceBuildRunning = false;
+			if (_sourceBuildPending)
+			{
+				_sourceBuildPending = false;
+				_sourceEditBuildTimer.Stop();
+				_sourceEditBuildTimer.Start();
+			}
+		}
+	}
+
+	private void ShowBuildDiagnostics(IReadOnlyList<KeilBuildDiagnostic> diagnostics, string logPath)
+	{
+		if (_buildDiagnosticsList == null || _buildDiagnosticsRow == null)
+		{
+			return;
+		}
+
+		_buildDiagnosticsList.Items.Clear();
+		foreach (KeilBuildDiagnostic diagnostic in diagnostics)
+		{
+			_buildDiagnosticsList.Items.Add(diagnostic);
+		}
+		if (diagnostics.Count == 0 && !string.IsNullOrWhiteSpace(logPath))
+		{
+			_buildDiagnosticsList.Items.Add("Keil 日志：" + logPath);
+		}
+
+		bool visible = diagnostics.Count > 0;
+		_buildDiagnosticsList.Visible = visible;
+		_buildDiagnosticsRow.Height = visible ? Ui(120) : 0f;
+		_buildDiagnosticsList.Parent?.PerformLayout();
+	}
+
+	private void BuildDiagnosticsListDoubleClick(object? sender, EventArgs e)
+	{
+		if (_buildDiagnosticsList?.SelectedItem is KeilBuildDiagnostic diagnostic &&
+			!string.IsNullOrWhiteSpace(diagnostic.FilePath) &&
+			File.Exists(diagnostic.FilePath))
+		{
+			NavigateToSourceLocation(diagnostic.FilePath, Math.Max(1, diagnostic.Line), pushCurrent: _currentFunctionSource != null);
+		}
+	}
+
+	private void UpdateSourceEditStatus(string text, Color color)
+	{
+		if (_sourceEditStatusLabel == null || _sourceEditStatusLabel.IsDisposed)
+		{
+			return;
+		}
+
+		_sourceEditStatusLabel.Text = text;
+		_sourceEditStatusLabel.ForeColor = color;
+	}
+
+	private List<CodeLineRender> BuildEditorRenderLinesFromScintilla()
+	{
+		var lines = new List<CodeLineRender>();
+		if (_codeEditor == null)
+		{
+			return lines;
+		}
+
+		string[] textLines = _codeEditor.Text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n').Split('\n');
+		for (int i = 0; i < textLines.Length; i++)
+		{
+			lines.Add(new CodeLineRender(i + 1, textLines[i], new List<string>(), false, new List<InlineValueSpan>()));
+		}
+		return lines;
+	}
+
+	private bool TryResolveSourceSymbolFromCodeEditor(string identifier, out SourceSymbol symbol)
+	{
+		symbol = default!;
+		if (_codeEditor == null || _codeEditor.IsDisposed)
+		{
+			return false;
+		}
+
+		FunctionSourceView? codeView = GetCodeViewSource();
+		if (codeView == null)
+		{
+			return false;
+		}
+
+		EnsureSourceSymbolIndex();
+		int lineIndex = _codeEditor.LineFromPosition(Math.Clamp(_codeEditor.CurrentPosition, 0, Math.Max(0, _codeEditor.TextLength)));
+		int absoluteLine = codeView.StartLine + lineIndex;
+		return _sourceSymbolIndex.TryResolveIdentifier(codeView.FilePath, absoluteLine, identifier, out symbol);
+	}
+
+	private bool TryResolveSourceSymbolAtScintillaPosition(int position, string identifier, out SourceSymbol symbol)
+	{
+		symbol = default!;
+		if (_codeEditor == null || _codeEditor.IsDisposed)
+		{
+			return false;
+		}
+
+		FunctionSourceView? codeView = GetCodeViewSource();
+		if (codeView == null)
+		{
+			return false;
+		}
+
+		EnsureSourceSymbolIndex();
+		int lineIndex = _codeEditor.LineFromPosition(Math.Clamp(position, 0, Math.Max(0, _codeEditor.TextLength)));
+		int absoluteLine = codeView.StartLine + lineIndex;
+		return _sourceSymbolIndex.TryResolveIdentifier(codeView.FilePath, absoluteLine, identifier, out symbol);
+	}
+
+	private void NavigateToSourceLocation(string filePath, int lineNumber, bool pushCurrent)
+	{
+		if (TryLoadNearestFunctionSource(filePath, lineNumber, out FunctionSourceView? nearest) && nearest != null)
+		{
+			ShowFunctionSource(nearest, pushCurrent: pushCurrent, clearForward: pushCurrent);
+			SelectApproximateLineInFunction(lineNumber);
+			return;
+		}
+		if (TryLoadSourceSnippet(filePath, lineNumber, out FunctionSourceView? snippet) && snippet != null)
+		{
+			ShowFunctionSource(snippet, pushCurrent: pushCurrent, clearForward: pushCurrent);
+			SelectApproximateLineInFunction(lineNumber);
+		}
+	}
+
+	private async Task RenameSourceSymbolAsync(SourceSymbol symbol)
+	{
+		string? newName = PromptForText("重命名变量", "新变量名：", symbol.Name);
+		if (string.IsNullOrWhiteSpace(newName) || newName.Equals(symbol.Name, StringComparison.Ordinal))
+		{
+			return;
+		}
+
+		await SaveSourceEditNowAsync(scheduleBuild: false).ConfigureAwait(true);
+		if (_sourceEditSession != null && _sourceEditSession.Dirty)
+		{
+			Log("当前源码未保存，已取消重命名。");
+			return;
+		}
+
+		EnsureSourceSymbolIndex();
+		SourceRenameResult result = _sourceSymbolIndex.RenameSymbolInProject(symbol, newName.Trim());
+		foreach (SourceDiagnostic diagnostic in result.Diagnostics)
+		{
+			Log("源码重构：" + diagnostic.Message);
+		}
+		if (!result.Success)
+		{
+			UpdateSourceEditStatus("重命名失败", Color.FromArgb(248, 113, 113));
+			return;
+		}
+
+		ClearFunctionIndex();
+		_sourceEditSession = null;
+		RebuildSourceSymbolIndex();
+		RefreshCurrentFunctionSourceFromDisk(logResult: false);
+		UpdateSourceEditStatus("已重命名", _accent);
+		Log($"源码重构：{symbol.Name} -> {newName.Trim()}，{result.ReplacementCount} 处，文件 {result.ChangedFiles.Count} 个。");
+		if (_autoBuildAfterSourceSave)
+		{
+			_sourceEditBuildTimer.Stop();
+			_sourceEditBuildTimer.Start();
+		}
+	}
+
+	private void DeclareLocalVariableFromCode(string identifier)
+	{
+		if (_codeEditor == null || _codeEditor.IsDisposed || _sourceEditSession == null)
+		{
+			return;
+		}
+
+		string name = NormalizeFocusedVariableName(identifier);
+		if (name.Length == 0)
+		{
+			return;
+		}
+
+		string? typeName = PromptForText("声明新局部变量", "变量类型：", "int");
+		if (string.IsNullOrWhiteSpace(typeName))
+		{
+			return;
+		}
+
+		FunctionSourceView? codeView = GetCodeViewSource();
+		if (codeView == null)
+		{
+			return;
+		}
+
+		int lineIndex = _codeEditor.LineFromPosition(Math.Clamp(_codeEditor.CurrentPosition, 0, Math.Max(0, _codeEditor.TextLength)));
+		int absoluteLine = codeView.StartLine + lineIndex;
+		EnsureSourceSymbolIndex();
+		if (_sourceSymbolIndex.TryDeclareLocalVariable(codeView.FilePath, _codeEditor.Text, absoluteLine, name, typeName, out string newText, out SourceDiagnostic diagnostic))
+		{
+			_sourceEditInternalTextChange = true;
+			try
+			{
+				_codeEditor.Text = newText;
+				_functionCodeBox.Text = newText;
+			}
+			finally
+			{
+				_sourceEditInternalTextChange = false;
+			}
+			_sourceEditSession.MarkDirty(newText);
+			UpdateSourceEditStatus("未保存", Color.FromArgb(245, 158, 11));
+			_sourceEditSaveTimer.Stop();
+			_sourceEditSaveTimer.Start();
+			Log("源码重构：" + diagnostic.Message);
+		}
+		else
+		{
+			Log("声明局部变量失败：" + diagnostic.Message);
+		}
+	}
+
+	private string? PromptForText(string title, string prompt, string defaultValue)
+	{
+		using Form dialog = new Form
+		{
+			Text = title,
+			StartPosition = FormStartPosition.CenterParent,
+			FormBorderStyle = FormBorderStyle.FixedDialog,
+			MinimizeBox = false,
+			MaximizeBox = false,
+			ClientSize = new Size(Ui(360), Ui(128)),
+			BackColor = _surface
+		};
+		Label label = new Label
+		{
+			Text = prompt,
+			AutoSize = false,
+			TextAlign = ContentAlignment.MiddleLeft,
+			Bounds = new Rectangle(Ui(12), Ui(12), Ui(336), Ui(24)),
+			ForeColor = _ink,
+			BackColor = _surface
+		};
+		TextBox input = new TextBox
+		{
+			Text = defaultValue,
+			Bounds = new Rectangle(Ui(12), Ui(42), Ui(336), Ui(28))
+		};
+		StyleTextBox(input);
+		Button ok = CommandButton("确定");
+		ok.DialogResult = DialogResult.OK;
+		ok.Bounds = new Rectangle(Ui(188), Ui(86), Ui(76), Ui(30));
+		Button cancel = PlainButton("取消");
+		cancel.DialogResult = DialogResult.Cancel;
+		cancel.Bounds = new Rectangle(Ui(272), Ui(86), Ui(76), Ui(30));
+		dialog.Controls.Add(label);
+		dialog.Controls.Add(input);
+		dialog.Controls.Add(ok);
+		dialog.Controls.Add(cancel);
+		dialog.AcceptButton = ok;
+		dialog.CancelButton = cancel;
+		input.SelectAll();
+		return dialog.ShowDialog(this) == DialogResult.OK ? input.Text.Trim() : null;
 	}
 
 	private void AppendCodeTokensRtf(StringBuilder builder, string text, int lineHighlightIndex = 0)
@@ -22253,6 +22927,10 @@ public sealed partial class MainForm : Form
 			UiDpi = layoutDpi,
 			FunctionCodeFontSize = _functionCodeFontSize,
 			ProgramTreeFontSize = _programTreeFontSize,
+			KeilProjectPath = _keilProjectPath,
+			KeilTargetName = _keilTargetName,
+			SourceEditEnabled = _sourceEditEnabled,
+			AutoBuildAfterSourceSave = _autoBuildAfterSourceSave,
 			MonitorColumnWidths = columnWidths,
 			OfflineRootFunctions = GetConfiguredOfflineRootNames().ToList(),
 			Variables = BuildProfileVariables()
@@ -22416,6 +23094,10 @@ public sealed partial class MainForm : Form
 			_intervalBox.Value = Math.Clamp(monitorProfile.PollIntervalMs, (int)_intervalBox.Minimum, (int)_intervalBox.Maximum);
 			_targetCycleMs = (int)_intervalBox.Value;
 			_showHexValue = monitorProfile.ShowHexValue;
+			_keilProjectPath = monitorProfile.KeilProjectPath ?? "";
+			_keilTargetName = monitorProfile.KeilTargetName ?? "";
+			_sourceEditEnabled = monitorProfile.SourceEditEnabled;
+			_autoBuildAfterSourceSave = monitorProfile.AutoBuildAfterSourceSave;
 			_offlineRootSelectionText = string.Join(", ", monitorProfile.OfflineRootFunctions
 				.Where(name => !string.IsNullOrWhiteSpace(name))
 				.Distinct(StringComparer.OrdinalIgnoreCase));

@@ -20,6 +20,17 @@ static class Program
             return exitCode;
         }
 
+        if (args.Any(arg => arg.Equals("--source-edit-self-test", StringComparison.OrdinalIgnoreCase)))
+        {
+            AttachParentConsole();
+            using var writer = new StringWriter(CultureInfo.InvariantCulture);
+            int exitCode = SourceEditService.RunSelfTest(writer);
+            string report = writer.ToString();
+            Console.Write(report);
+            WriteSelfTestLog("source_edit_selftest.log", report);
+            return exitCode;
+        }
+
         using var singleInstance = new System.Threading.Mutex(true, "CanVariableMonitor_Kangxu_SingleInstance", out bool firstInstance);
         if (!firstInstance)
         {
@@ -85,11 +96,16 @@ static class Program
 
     private static void WriteSyntaxHighlightSelfTestLog(string report)
     {
+        WriteSelfTestLog("syntax_highlight_selftest.log", report);
+    }
+
+    private static void WriteSelfTestLog(string fileName, string report)
+    {
         try
         {
             string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "CanVariableMonitor");
             Directory.CreateDirectory(dir);
-            File.WriteAllText(Path.Combine(dir, "syntax_highlight_selftest.log"), report, System.Text.Encoding.UTF8);
+            File.WriteAllText(Path.Combine(dir, fileName), report, System.Text.Encoding.UTF8);
         }
         catch
         {

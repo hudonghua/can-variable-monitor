@@ -4,7 +4,7 @@
 
 - GitHub 仓库：`https://github.com/hudonghua/can-variable-monitor.git`
 - 关键词：`上位机监控`
-- 当前源码版本号：`V1.42`
+- 当前源码版本号：`V1.43`
 - 自动更新地址：`http://8.148.250.52:9999/update_manifest.json`
 - F 盘本机测试目录：`F:\工作\AI模型\s上位机\监控上位机\上位机\上位机监控_V1.2_20260612_120554`
 
@@ -38,6 +38,10 @@ can_monitor_latest.zip
 
 ## 近期重点改动
 
+- `MainForm.cs`：V1.43 起“2 看数值”Scintilla 代码窗口支持直接编辑 `.c/.h` 源码；运行值不再插入真实文本，继续走 indicator/annotation/overlay 显示，避免 `//值:【...】` 被保存进客户代码。
+- `SourceEditService.cs`：新增源码编辑会话，保持 UTF-8 BOM / UTF-8 无 BOM / GB18030 编码和换行风格；空闲 1.5 秒自动保存，首次写入前创建同级 `.bak`，检测到外部修改时停止自动保存并提示冲突。
+- `KeilBuildService.cs`：新增 V1.43 自动 Keil 构建服务，优先 FLASH target，否则使用第一个 target；日志写到 `canmon_v143_build.log`，失败时保留源码并解析 error/warning 供 UI 跳转。
+- `SourceSymbolIndex.cs`：新增 C/Keil 源码符号索引，识别函数、参数、局部变量、文件 static、extern、全局、宏；解析优先级为局部/参数 > 文件 static > 全局/extern > map/axf 地址 fallback。
 - `AppUpdateService.cs`：自动更新改为版本字符串不一致即更新，更新失败会弹窗提示。
 - `PublishUnified.ps1`：服务器包精简为两个文件。
 - `MainForm.cs`：代码区、数值显示、主题、函数树联动、在线/离线调试交互仍在持续调整。
@@ -45,6 +49,42 @@ can_monitor_latest.zip
 - `keil_compat.h` 由 AppStubPack 写入 `%LOCALAPPDATA%\CanVariableMonitor\offline_c_worker\...` 临时仿真目录，通过 wrapper 注入；不写客户工程，不要求客户源码 include，在线 CAN 监控完全不依赖它。
 - 离线 worker 不能靠逐个客户工程“调教”；入口由调用图和通用 entry rules 自动发现，UI 可选择并保存项目入口配置；找不到入口时降级静态离线并显示候选/未覆盖诊断。
 - `OfflineWorkerSelfTest.ps1`、`OfflineRealProjectProbe.ps1`：用于离线 worker 本机验证。
+
+## 2026-06-17 V1.43 看数值源码编辑
+
+本轮目标是让“2 看数值”代码窗口从只读查看变成源码编辑缓冲区。用户编辑停止约 1.5 秒后自动保存当前 `.c/.h`，约 3 秒后触发 Keil 自动编译。`Ctrl+S` 会立即保存。保存失败或 Keil 编译失败不回滚源码，界面显示状态和错误列表，双击 Keil 诊断可跳到源码行。
+
+安全边界：
+
+- 客户源码只在用户实际编辑后写回。
+- 每个文件本次编辑首次写入前创建同级 `文件名.bak`，不会把运行值写进源码。
+- 如果磁盘文件被 Keil/编辑器/其他程序外部改过，自动保存停止并提示“外部冲突”，不覆盖外部修改。
+- 在线 CAN 监控仍只读已编译 map/axf 中有地址的全局变量；新增局部变量不会进入在线监控。
+- 新增全局变量只有 Keil 编译成功、map/axf 刷新后才可能加入在线监控。
+
+右键源码菜单新增：
+
+- 转到定义 / 转到声明。
+- 重命名变量：局部/参数限定当前函数作用域，文件 static 限定当前文件，全局/extern 按同一符号跨工程替换；注释和字符串中的同名文本不改。
+- 声明新局部变量：未声明标识符默认按局部变量处理，插到当前函数顶部的 C90 安全声明区，默认类型 `int`，弹窗可改类型。
+- 查看 Keil 错误。
+
+新增自检入口：
+
+```powershell
+.\上位机监控.exe --source-edit-self-test
+```
+
+通过标准：输出 `SourceEditSelfTest: PASS`，覆盖编码保持、`.bak` 首次保存、外部修改冲突、注释/字符串跳过重命名、局部遮蔽全局、extern/global map 地址绑定、局部声明插入、Keil 日志解析。
+
+本机验证结果：
+
+- `dotnet build .\CanVariableMonitor\CanVariableMonitor.csproj -v:minimal`：通过，0 错误，保留 59 个历史警告。
+- `dotnet build .\CanVariableMonitor.OfflineCWorker\CanVariableMonitor.OfflineCWorker.csproj -v:minimal`：通过，0 警告，0 错误。
+- `dotnet run --no-build --project .\CanVariableMonitor\CanVariableMonitor.csproj -- --source-edit-self-test`：通过。
+- `dotnet run --no-build --project .\CanVariableMonitor\CanVariableMonitor.csproj -- --syntax-highlight-self-test`：通过。
+- `powershell -ExecutionPolicy Bypass -File .\CanVariableMonitor\OfflineWorkerSelfTest.ps1`：通过。
+- 三个真实 Keil 工程 `OfflineRealProjectProbe.ps1 -ProjectSrc ...`：通过；铵油装药车编码器铁轮版、旭工干喷、华矿二代半液压主控均保持 `__canmon_main_loop_tick`，强制分支执行通过。
 
 ## 2026-06-15 V1.3 main-loop 离线内测结果
 
