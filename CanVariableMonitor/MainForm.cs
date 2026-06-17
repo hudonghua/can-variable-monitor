@@ -404,6 +404,8 @@ public sealed partial class MainForm : Form
 
 	private int _lastScintillaScopeCaret = -1;
 
+	private int _lastScintillaHoverLine = -1;
+
 	private string _lastFunctionHoverContextName = "";
 
 	private DateTime _lastFunctionHoverContextUtc;
@@ -746,6 +748,8 @@ public sealed partial class MainForm : Form
 	private const int ScintillaMarkerTrueLine = 8;
 
 	private const int ScintillaMarkerSearchLine = 9;
+
+	private const int ScintillaMarkerHoverLine = 10;
 
 	private const int ScintillaValueMarginIndex = 1;
 
@@ -2758,8 +2762,8 @@ public sealed partial class MainForm : Form
 			HScrollBar = true,
 			VScrollBar = true,
 			WrapMode = ScintillaNET.WrapMode.None,
-			TabWidth = 4,
-			IndentWidth = 4,
+			TabWidth = 2,
+			IndentWidth = 2,
 			UseTabs = false,
 			TabIndents = true,
 			BackspaceUnindents = true,
@@ -2777,6 +2781,7 @@ public sealed partial class MainForm : Form
 		editor.MouseMove += CodeEditorMouseMove;
 		editor.MouseLeave += delegate
 		{
+			ClearScintillaHoverLine();
 			ClearFunctionHoverCache();
 			editor.Cursor = Cursors.IBeam;
 		};
@@ -2855,6 +2860,8 @@ public sealed partial class MainForm : Form
 		editor.Markers[ScintillaMarkerTrueLine].SetBackColor(_codeTrueLineBackColor);
 		editor.Markers[ScintillaMarkerSearchLine].Symbol = ScintillaNET.MarkerSymbol.Background;
 		editor.Markers[ScintillaMarkerSearchLine].SetBackColor(_programSearchLineBackColor);
+		editor.Markers[ScintillaMarkerHoverLine].Symbol = ScintillaNET.MarkerSymbol.Background;
+		editor.Markers[ScintillaMarkerHoverLine].SetBackColor(IsCurrentLightTheme() ? Color.FromArgb(220, 252, 231) : Color.FromArgb(30, 76, 50));
 		editor.Indicators[ScintillaIndicatorFocus].Style = ScintillaNET.IndicatorStyle.RoundBox;
 		editor.Indicators[ScintillaIndicatorFocus].ForeColor = _codeFocusVariableBackColor;
 		editor.Indicators[ScintillaIndicatorFocus].Alpha = 90;
@@ -12668,12 +12675,44 @@ public sealed partial class MainForm : Form
 		return match.Success ? match.Value : "";
 	}
 
+	private void UpdateScintillaHoverLine(Point location)
+	{
+		if (_codeEditor == null || _codeEditor.IsDisposed || _codeEditor.TextLength == 0)
+		{
+			ClearScintillaHoverLine();
+			return;
+		}
+
+		int lineIndex = GetScintillaLineFromPoint(_codeEditor, location);
+		if (lineIndex == _lastScintillaHoverLine)
+		{
+			return;
+		}
+
+		_codeEditor.MarkerDeleteAll(ScintillaMarkerHoverLine);
+		_codeEditor.Lines[lineIndex].MarkerAdd(ScintillaMarkerHoverLine);
+		_lastScintillaHoverLine = lineIndex;
+	}
+
+	private void ClearScintillaHoverLine()
+	{
+		_lastScintillaHoverLine = -1;
+		if (_codeEditor == null || _codeEditor.IsDisposed)
+		{
+			return;
+		}
+
+		_codeEditor.MarkerDeleteAll(ScintillaMarkerHoverLine);
+	}
+
 	private void CodeEditorMouseMove(object? sender, MouseEventArgs e)
 	{
 		if (_codeEditor == null || _codeEditor.TextLength == 0)
 		{
+			ClearScintillaHoverLine();
 			return;
 		}
+		UpdateScintillaHoverLine(e.Location);
 		if (AreCodeInteractionSideEffectsSuppressed())
 		{
 			ClearScintillaFunctionHoverHighlight();
@@ -17925,6 +17964,15 @@ public sealed partial class MainForm : Form
 
 		_codeEditor.MarkerDeleteAll(ScintillaMarkerTrueLine);
 		_codeEditor.MarkerDeleteAll(ScintillaMarkerSearchLine);
+		_codeEditor.MarkerDeleteAll(ScintillaMarkerHoverLine);
+		if (_lastScintillaHoverLine >= 0 && _lastScintillaHoverLine < _codeEditor.Lines.Count)
+		{
+			_codeEditor.Lines[_lastScintillaHoverLine].MarkerAdd(ScintillaMarkerHoverLine);
+		}
+		else
+		{
+			_lastScintillaHoverLine = -1;
+		}
 		_codeEditor.IndicatorCurrent = ScintillaIndicatorFocus;
 		_codeEditor.IndicatorClearRange(0, _codeEditor.TextLength);
 		_codeEditor.IndicatorCurrent = ScintillaIndicatorSearch;
